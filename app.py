@@ -1,104 +1,171 @@
-import random
-import time
-from datetime import datetime
-import pandas as pd
-import streamlit as st
+import os
+import threading
+import requests
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
 
-st.set_page_config(page_title="ROBI BOT - Paper Trading", layout="wide")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+PUBLIC_URL = os.getenv(
+    "PUBLIC_URL",
+    "https://robi-bot-0iea.onrender.com",
+).rstrip("/")
 
-if "balance" not in st.session_state:
-    st.session_state.balance = 40.0
-if "start_balance" not in st.session_state:
-    st.session_state.start_balance = 40.0
-if "trades" not in st.session_state:
-    st.session_state.trades = []
-if "history" not in st.session_state:
-    st.session_state.history = [{"time": datetime.now().strftime("%H:%M:%S"), "balance": 40.0}]
-if "running" not in st.session_state:
-    st.session_state.running = False
+app = FastAPI(title="ROBI Trading Bot")
 
-st.title("🤖 ROBI BOT — Paper Trading")
-st.caption("نسخة تجريبية: لا ترسل أي معاملة حقيقية ولا تستخدم أموالًا حقيقية.")
+balance = 40.0
+paused = False
+trades = []
 
-c1, c2, c3, c4 = st.columns(4)
-pnl = st.session_state.balance - st.session_state.start_balance
-wins = sum(1 for x in st.session_state.trades if x["pnl"] > 0)
-total = len(st.session_state.trades)
-win_rate = (wins / total * 100) if total else 0
 
-c1.metric("BALANCE", f"${st.session_state.balance:,.2f}")
-c2.metric("TOTAL P&L", f"${pnl:,.2f}", f"{pnl:+.2f}")
-c3.metric("WIN RATE", f"{win_rate:.0f}%")
-c4.metric("TASKS", str(total))
+def telegram(method: str, payload: dict | None = None):
+    if not TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+    response = requests.post(url, json=payload or {}, timeout=15)
+    response.raise_for_status()
+    return response.json()
 
-st.divider()
 
-left, right = st.columns([1, 1])
+def send_message(chat_id: int, text: str):
+    return telegram("sendMessage", {"chat_id": chat_id, "text": text})
 
-with left:
-    st.subheader("AI AGENTS")
-    agents = [
-        ("SCOUT", "يرصد العملات والـvolume والسيولة"),
-        ("RISK", "يفحص السيولة والتذبذب وحجم المركز"),
-        ("EXEC", "ينفذ صفقة وهمية وفق القواعد"),
-    ]
-    for name, desc in agents:
-        st.write(f"**{name}** — {desc}")
 
-    st.subheader("CONTROL")
-    risk = st.slider("Risk per trade (%)", 1.0, 20.0, 5.0, 0.5)
-    min_score = st.slider("Minimum signal score", 0, 100, 70)
+def handle_message(message: dict):
+    global balance, paused
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
+    text = (message.get("text") or "").strip().lower()
 
-    if st.button("▶ تشغيل دورة محاكاة"):
-        # Random market signal; intentionally simulated.
+    if not chat_id:
+        return
+
+    if text == "/start":
+        send_message(
+            chat_id,
+            "🤖 ROBI Trading Bot\n\n"
+            "وضع التشغيل: Paper Trading فقط\n"
+            "الرصيد التجريبي: $40.00\n\n"
+            "الأوامر:\n"
+            "/status - الحالة والرصيد\n"
+            "/scan - محاكاة فحص\n"
+            "/pause - إيقاف المحاكاة\n"
+            "/resume - تشغيل المحاكاة\n"
+            "/help - المساعدة",
+        )
+
+    elif text == "/status":
+        pnl = balance - 40.0
+        send_message(
+            chat_id,
+            f"📊 الحالة: {'PAUSED' if paused else 'RUNNING'}\n"
+            f"💰 الرصيد التجريبي: ${balance:.2f}\n"
+            f"📈 P&L: ${pnl:+.2f}\n"
+            f"🔢 العمليات: {len(trades)}",
+        )
+
+    elif text == "/pause":
+        paused = True
+        send_message(chat_id, "⏸ تم إيقاف المحاكاة.")
+
+    elif text == "/resume":
+        paused = False
+        send_message(chat_id, "▶️ تم تشغيل المحاكاة.")
+
+    elif text == "/scan":
+        if paused:
+            send_message(chat_id, "⏸ البوت متوقف. استخدم /resume أولًا.")
+            return
+
+        # Educational paper-trading simulation only.
+        import random
+
         score = random.randint(40, 98)
-        volume = random.uniform(1000, 50000)
         change = random.uniform(-12, 25)
 
-        if score >= min_score and change > 0:
-            size = st.session_state.balance * (risk / 100)
-            # Simple educational simulation, not a market model.
+        if score >= 70 and change > 0:
+            size = balance * 0.05
             trade_pnl = size * random.uniform(-0.20, 0.45)
-            st.session_state.balance += trade_pnl
-            st.session_state.trades.append({
-                "time": datetime.now().strftime("%H:%M:%S"),
-                "signal": score,
-                "change": round(change, 2),
-                "volume": round(volume, 2),
-                "size": round(size, 2),
-                "pnl": round(trade_pnl, 2),
-            })
-            action = f"BUY → simulated P&L ${trade_pnl:+.2f}"
+
+            balance += trade_pnl
+            trades.append(
+                {
+                    "score": score,
+                    "change": round(change, 2),
+                    "pnl": round(trade_pnl, 2),
+                }
+            )
+
+            send_message(
+                chat_id,
+                f"🔎 SCAN\n"
+                f"Signal: {score}\n"
+                f"Change: {change:+.2f}%\n"
+                f"🧪 Paper trade P&L: ${trade_pnl:+.2f}\n"
+                f"💰 Balance: ${balance:.2f}",
+            )
         else:
-            action = "SKIP → signal did not pass filters"
+            send_message(
+                chat_id,
+                f"🔎 SCAN\nSignal: {score}\n"
+                f"Change: {change:+.2f}%\n"
+                "⏭ SKIP - لم تتجاوز الإشارة الفلاتر.",
+            )
 
-        st.session_state.history.append({
-            "time": datetime.now().strftime("%H:%M:%S"),
-            "balance": round(st.session_state.balance, 2)
-        })
-        st.success(action)
+    elif text == "/help":
+        send_message(
+            chat_id,
+            "/start\n/status\n/scan\n/pause\n/resume\n/help\n\n"
+            "هذا الإصدار تجريبي ولا ينفذ أي تداول حقيقي.",
+        )
 
-    if st.button("↺ إعادة المحاكاة إلى $40"):
-        st.session_state.balance = 40.0
-        st.session_state.trades = []
-        st.session_state.history = [{"time": datetime.now().strftime("%H:%M:%S"), "balance": 40.0}]
-        st.rerun()
 
-with right:
-    st.subheader("BALANCE HISTORY")
-    chart = pd.DataFrame(st.session_state.history)
-    if len(chart) > 1:
-        chart["time"] = range(len(chart))
-        st.line_chart(chart.set_index("time")["balance"])
-    else:
-        st.info("شغّل عدة دورات لرؤية الرسم.")
+@app.get("/", response_class=HTMLResponse)
+def home():
+    return """
+    <h2>ROBI Trading Bot</h2>
+    <p>Telegram webhook service is running.</p>
+    <p>Mode: Paper Trading only.</p>
+    """
 
-st.divider()
-st.subheader("ACTIVITY LOG")
-if st.session_state.trades:
-    df = pd.DataFrame(st.session_state.trades).iloc[::-1]
-    st.dataframe(df, use_container_width=True, hide_index=True)
-else:
-    st.info("لا توجد عمليات بعد.")
 
-st.caption("هذه المحاكاة تعليمية وليست نموذجًا للتنبؤ بالربح أو توصية استثمارية.")
+@app.get("/health")
+def health():
+    return {
+        "ok": True,
+        "telegram_token_configured": bool(TOKEN),
+        "webhook_url": f"{PUBLIC_URL}/telegram/webhook",
+    }
+
+
+@app.post("/telegram/webhook")
+async def telegram_webhook(request: Request):
+    update = await request.json()
+    message = update.get("message")
+
+    if message:
+        threading.Thread(
+            target=handle_message,
+            args=(message,),
+            daemon=True,
+        ).start()
+
+    return {"ok": True}
+
+
+def configure_webhook():
+    if not TOKEN:
+        print("WARNING: TELEGRAM_BOT_TOKEN is not configured.")
+        return
+
+    webhook_url = f"{PUBLIC_URL}/telegram/webhook"
+
+    try:
+        result = telegram("setWebhook", {"url": webhook_url})
+        print("Telegram webhook configured:", result)
+    except Exception as exc:
+        print("WARNING: Could not configure Telegram webhook:", exc)
+
+
+@app.on_event("startup")
+def startup():
+    threading.Thread(target=configure_webhook, daemon=True).start()
