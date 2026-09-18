@@ -1,64 +1,104 @@
-import os, threading, time
-import requests
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+import random
+import time
+from datetime import datetime
+import pandas as pd
+import streamlit as st
 
-app = FastAPI(title="ROBI Trading Bot")
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-PUBLIC_URL = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-balance = 40.0
-paused = False
-trades = []
+st.set_page_config(page_title="ROBI BOT - Paper Trading", layout="wide")
 
-def tg(method, payload=None):
-    if not TOKEN: return None
-    try:
-        return requests.post(f"https://api.telegram.org/bot{TOKEN}/{method}", json=payload or {}, timeout=15).json()
-    except Exception:
-        return None
+if "balance" not in st.session_state:
+    st.session_state.balance = 40.0
+if "start_balance" not in st.session_state:
+    st.session_state.start_balance = 40.0
+if "trades" not in st.session_state:
+    st.session_state.trades = []
+if "history" not in st.session_state:
+    st.session_state.history = [{"time": datetime.now().strftime("%H:%M:%S"), "balance": 40.0}]
+if "running" not in st.session_state:
+    st.session_state.running = False
 
-def send(chat_id, text):
-    tg("sendMessage", {"chat_id": chat_id, "text": text})
+st.title("🤖 ROBI BOT — Paper Trading")
+st.caption("نسخة تجريبية: لا ترسل أي معاملة حقيقية ولا تستخدم أموالًا حقيقية.")
 
-def handle_message(message):
-    global paused
-    chat_id = message.get("chat", {}).get("id")
-    text = (message.get("text") or "").strip().lower()
-    if not chat_id: return
-    if text == "/start":
-        send(chat_id, "🤖 أهلاً بك في ROBI Trading Bot\n\n💰 الرصيد التجريبي: $40.00\n📊 الوضع: Paper Trading فقط\n🟢 الحالة: Online\n\n/status - الحالة والرصيد\n/scan - فحص تجريبي للسوق\n/pause - إيقاف المحاكاة\n/resume - تشغيل المحاكاة\n/help - الأوامر")
-    elif text == "/status":
-        send(chat_id, f"🤖 ROBI STATUS\n\n💰 Balance: ${balance:.2f}\n📈 Trades: {len(trades)}\n🟢 Mode: {'PAUSED' if paused else 'RUNNING'}\n🧪 Paper Trading فقط")
-    elif text == "/pause":
-        paused = True; send(chat_id, "⏸ تم إيقاف المحاكاة.")
-    elif text == "/resume":
-        paused = False; send(chat_id, "▶️ تم تشغيل المحاكاة.")
-    elif text == "/scan":
-        send(chat_id, "⏸ البوت متوقف. استخدم /resume أولاً." if paused else "🔎 SCAN RESULT\n\n🧪 هذه محاكاة تعليمية فقط.\nلا توجد صفقات حقيقية أو أموال حقيقية.")
-    elif text == "/help":
-        send(chat_id, "/start\n/status\n/scan\n/pause\n/resume\n/help")
+c1, c2, c3, c4 = st.columns(4)
+pnl = st.session_state.balance - st.session_state.start_balance
+wins = sum(1 for x in st.session_state.trades if x["pnl"] > 0)
+total = len(st.session_state.trades)
+win_rate = (wins / total * 100) if total else 0
 
-@app.get("/", response_class=HTMLResponse)
-def home():
-    return f"<h1>🤖 ROBI BOT</h1><p>Balance: ${balance:.2f}</p><p>Mode: {'PAUSED' if paused else 'RUNNING'}</p><p>Telegram: {'Connected' if TOKEN else 'Token missing'}</p><p>Paper Trading only.</p>"
+c1.metric("BALANCE", f"${st.session_state.balance:,.2f}")
+c2.metric("TOTAL P&L", f"${pnl:,.2f}", f"{pnl:+.2f}")
+c3.metric("WIN RATE", f"{win_rate:.0f}%")
+c4.metric("TASKS", str(total))
 
-@app.get("/health")
-def health():
-    return {"ok": True, "telegram_token_configured": bool(TOKEN)}
+st.divider()
 
-@app.post("/telegram/webhook")
-async def telegram_webhook(request: Request):
-    update = await request.json()
-    message = update.get("message")
-    if message:
-        threading.Thread(target=handle_message, args=(message,), daemon=True).start()
-    return {"ok": True}
+left, right = st.columns([1, 1])
 
-def configure_webhook():
-    if TOKEN and PUBLIC_URL:
-        time.sleep(2)
-        tg("setWebhook", {"url": PUBLIC_URL + "/telegram/webhook"})
+with left:
+    st.subheader("AI AGENTS")
+    agents = [
+        ("SCOUT", "يرصد العملات والـvolume والسيولة"),
+        ("RISK", "يفحص السيولة والتذبذب وحجم المركز"),
+        ("EXEC", "ينفذ صفقة وهمية وفق القواعد"),
+    ]
+    for name, desc in agents:
+        st.write(f"**{name}** — {desc}")
 
-@app.on_event("startup")
-def startup():
-    threading.Thread(target=configure_webhook, daemon=True).start()
+    st.subheader("CONTROL")
+    risk = st.slider("Risk per trade (%)", 1.0, 20.0, 5.0, 0.5)
+    min_score = st.slider("Minimum signal score", 0, 100, 70)
+
+    if st.button("▶ تشغيل دورة محاكاة"):
+        # Random market signal; intentionally simulated.
+        score = random.randint(40, 98)
+        volume = random.uniform(1000, 50000)
+        change = random.uniform(-12, 25)
+
+        if score >= min_score and change > 0:
+            size = st.session_state.balance * (risk / 100)
+            # Simple educational simulation, not a market model.
+            trade_pnl = size * random.uniform(-0.20, 0.45)
+            st.session_state.balance += trade_pnl
+            st.session_state.trades.append({
+                "time": datetime.now().strftime("%H:%M:%S"),
+                "signal": score,
+                "change": round(change, 2),
+                "volume": round(volume, 2),
+                "size": round(size, 2),
+                "pnl": round(trade_pnl, 2),
+            })
+            action = f"BUY → simulated P&L ${trade_pnl:+.2f}"
+        else:
+            action = "SKIP → signal did not pass filters"
+
+        st.session_state.history.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "balance": round(st.session_state.balance, 2)
+        })
+        st.success(action)
+
+    if st.button("↺ إعادة المحاكاة إلى $40"):
+        st.session_state.balance = 40.0
+        st.session_state.trades = []
+        st.session_state.history = [{"time": datetime.now().strftime("%H:%M:%S"), "balance": 40.0}]
+        st.rerun()
+
+with right:
+    st.subheader("BALANCE HISTORY")
+    chart = pd.DataFrame(st.session_state.history)
+    if len(chart) > 1:
+        chart["time"] = range(len(chart))
+        st.line_chart(chart.set_index("time")["balance"])
+    else:
+        st.info("شغّل عدة دورات لرؤية الرسم.")
+
+st.divider()
+st.subheader("ACTIVITY LOG")
+if st.session_state.trades:
+    df = pd.DataFrame(st.session_state.trades).iloc[::-1]
+    st.dataframe(df, use_container_width=True, hide_index=True)
+else:
+    st.info("لا توجد عمليات بعد.")
+
+st.caption("هذه المحاكاة تعليمية وليست نموذجًا للتنبؤ بالربح أو توصية استثمارية.")
