@@ -189,7 +189,7 @@ def handle_message(message: dict):
         parts = text.split()
         symbol = parts[1] if len(parts) > 1 else "BTCUSDT"
 
-                try:
+        try:
             ticker = get_binance_ticker(symbol)
             price = float(ticker.get("lastPrice", 0))
             change = float(ticker.get("priceChangePercent", 0))
