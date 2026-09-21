@@ -53,11 +53,26 @@ def _normalize_symbol(symbol: str) -> str:
     return symbol.upper().replace("/", "").replace("-", "").replace("_", "").strip()
 
 
+CRYPTO_QUOTES = ("USDT", "USDC", "USD", "EUR", "GBP")
+FIAT_BASES = {
+    "USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF",
+}
+STABLE_BASES = {
+    "DAI", "TUSD", "USDE", "PYUSD", "FDUSD", "USDD", "EURC",
+}
+
+
 def is_crypto_symbol(symbol: str) -> bool:
+    """Classify arbitrary Kraken spot symbols, not just a hard-coded coin list."""
     s = _normalize_symbol(symbol)
-    return s.endswith(("USDT", "USD", "USDC", "EUR", "GBP")) and any(
-        s.startswith(x) for x in ("BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "DOT", "LINK", "AVAX", "ATOM", "BNB")
-    )
+    for quote in CRYPTO_QUOTES:
+        if s.endswith(quote):
+            base = s[:-len(quote)]
+            if not base or base in FIAT_BASES or base in STABLE_BASES:
+                return False
+            # Kraken may expose XBT while the scanner uses BTC.
+            return True
+    return False
 
 
 def is_us_symbol(symbol: str) -> bool:
