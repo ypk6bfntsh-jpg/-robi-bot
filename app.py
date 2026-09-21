@@ -539,9 +539,22 @@ def discover_crypto_market(limit=None):
                         break
             if not item:
                 continue
-            last = safe_float((item.get("c") or [0])[0])
-            open_price = safe_float((item.get("o") or [0])[0])
-            volume_base = safe_float((item.get("v") or [0, 0])[-1])
+            # Kraken Ticker fields may be returned as scalar strings
+            # (not arrays). Indexing a scalar string was causing values like
+            # "90000" -> "9", which produced absurd percentage changes.
+            close_field = item.get("c") or [0]
+            open_field = item.get("o") or [0]
+            volume_field = item.get("v") or [0, 0]
+
+            last = safe_float(
+                close_field[0] if isinstance(close_field, (list, tuple)) else close_field
+            )
+            open_price = safe_float(
+                open_field[0] if isinstance(open_field, (list, tuple)) else open_field
+            )
+            volume_base = safe_float(
+                volume_field[-1] if isinstance(volume_field, (list, tuple)) else volume_field
+            )
             change = ((last / open_price) - 1.0) * 100.0 if open_price else 0.0
             quote_volume = volume_base * last
             if abs(change) < SCAN_MIN_CHANGE and quote_volume < 5_000_000:
