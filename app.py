@@ -63,6 +63,7 @@ paper_trades: list[dict[str, Any]] = []
 last_monitor_state: dict[str, str] = {}
 
 # The existing engine is the source of the analysis implementation.
+MARKET_ADAPTER_IMPORT_ERROR = ""
 try:
     from robi_engine.integrated import (
         analyze_live,
@@ -70,53 +71,32 @@ try:
         trade_flow_summary,
     )
     from robi_engine.news_engine import fetch_news, latest_news, init_db
-    MARKET_ADAPTER_IMPORT_ERROR = ""
     try:
-        # Core market functions are imported independently from the optional
-        # status helper so an older live_data.py cannot disable real market reads.
-        from robi_engine.live_data import get_klines, get_ticker, market_kind
-        try:
-            from robi_engine.live_data import market_provider_status
-        except Exception as status_exc:
-            MARKET_ADAPTER_IMPORT_ERROR = f"status helper unavailable: {status_exc!r}"
-
-            def market_provider_status():
-                return {
-                    "configured": "auto",
-                    "routing": {
-                        "crypto": "kraken_public",
-                        "us_equity": "yahoo_finance_yfinance",
-                    },
-                    "real_trading": False,
-                    "private_api": False,
-                    "status_helper": "fallback",
-                }
+        from robi_engine.live_data import (
+            get_klines,
+            get_ticker,
+            market_kind,
+            market_provider_status,
+        )
     except Exception as market_exc:
         MARKET_ADAPTER_IMPORT_ERROR = repr(market_exc)
-
         def market_provider_status():
             return {
-                "configured": "unavailable",
+                "configured": "unknown",
                 "routing": {
                     "crypto": "kraken_public",
                     "us_equity": "yahoo_finance_yfinance",
                 },
                 "real_trading": False,
                 "private_api": False,
+                "market_adapter_import_error": MARKET_ADAPTER_IMPORT_ERROR,
             }
-
         def market_kind(symbol):
             return "unknown"
-
         def get_klines(*args, **kwargs):
-            raise RuntimeError(
-                f"Market data adapter unavailable: {MARKET_ADAPTER_IMPORT_ERROR}"
-            )
-
+            raise RuntimeError(f"Market data adapter unavailable: {MARKET_ADAPTER_IMPORT_ERROR}")
         def get_ticker(*args, **kwargs):
-            raise RuntimeError(
-                f"Market data adapter unavailable: {MARKET_ADAPTER_IMPORT_ERROR}"
-            )
+            raise RuntimeError(f"Market data adapter unavailable: {MARKET_ADAPTER_IMPORT_ERROR}")
     ENGINE_READY = True
     ENGINE_IMPORT_ERROR = ""
 except Exception as exc:
@@ -754,7 +734,6 @@ def health():
         "paper_trading": True,
         "database": DB_PATH,
         "market_data": market_status(),
-        "market_adapter_import_error": MARKET_ADAPTER_IMPORT_ERROR,
         "market_data_policy": "external_public_only",
         "crypto_provider": "Kraken Public API",
         "us_equity_provider": "Yahoo Finance / yfinance",
@@ -773,7 +752,6 @@ def market_test(symbol: str = "BTCUSDT", timeframe: str = "15m", limit: int = 20
             "timeframe": timeframe,
             "market_kind": market_kind(symbol),
             "error": str(exc),
-            "market_adapter_import_error": MARKET_ADAPTER_IMPORT_ERROR,
             "market_data_policy": "external_public_only",
             "crypto_provider": "Kraken Public API",
             "us_equity_provider": "Yahoo Finance / yfinance",
