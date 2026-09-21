@@ -54,6 +54,14 @@ DEFAULT_SYMBOLS = [
 REAL_TRADING_ENABLED = False
 START_BALANCE = 40.0
 
+# Broad public-market scanner. These are discovery limits, not trading signals.
+SCAN_CRYPTO_LIMIT = int(os.getenv("ROBI_SCAN_CRYPTO_LIMIT", "80"))
+SCAN_US_LIMIT = int(os.getenv("ROBI_SCAN_US_LIMIT", "80"))
+SCAN_DEEP_ANALYSIS = int(os.getenv("ROBI_SCAN_DEEP_ANALYSIS", "10"))
+SCAN_MIN_CHANGE = float(os.getenv("ROBI_SCAN_MIN_CHANGE", "0.75"))
+SCAN_NOTIFY_TOP = int(os.getenv("ROBI_SCAN_NOTIFY_TOP", "5"))
+
+
 app = FastAPI(title="ROBI Trading Bot")
 paused = False
 monitoring = False
@@ -468,6 +476,218 @@ def record_monitor_event(snapshot):
 
 
 # ------------------------------------------------------------
+# Broad public-market discovery scanner
+# ------------------------------------------------------------
+
+FIAT_OR_STABLE_BASES = {
+    "USD", "USDT", "USDC", "EUR", "GBP", "CAD", "AUD", "JPY", "CHF",
+    "DAI", "TUSD", "USDE", "PYUSD", "FDUSD", "USDD", "EURC",
+}
+
+
+def _scanner_score(change, quote_volume, market_cap=0):
+    """Discovery/routing score only; not a buy/sell score."""
+    return abs(safe_float(change)) * 3.0 + (max(safe_float(quote_volume), 0.0) ** 0.5) / 1000.0 + (max(safe_float(market_cap), 0.0) ** 0.5) / 100000.0
+
+
+def discover_crypto_market(limit=None):
+    limit = max(1, int(limit or SCAN_CRYPTO_LIMIT))
+    base = "https://api.kraken.com"
+    pairs_resp = requests.get(f"{base}/0/public/AssetPairs", timeout=20)
+    pairs_resp.raise_for_status()
+    payload = pairs_resp.json()
+    pairs = payload.get("result", {}) or {}
+
+    candidates = []
+    for key, meta in pairs.items():
+        status = str(meta.get("status", "online")).lower()
+        if status not in {"online", ""}:
+            continue
+        wsname = str(meta.get("wsname") or "")
+        altname = str(meta.get("altname") or key)
+        pair_name = wsname or altname
+        if "/" not in pair_name:
+            continue
+        base_asset, quote_asset = pair_name.split("/", 1)
+        base_clean = base_asset.upper().replace("XBT", "BTC")
+        quote_clean = quote_asset.upper().replace("XBT", "BTC")
+        if quote_clean not in {"USD", "USDT", "USDC"}:
+            continue
+        if base_clean in FIAT_OR_STABLE_BASES:
+            continue
+        candidates.append((key, altname, wsname, base_clean, quote_clean))
+
+    rows = []
+    for i in range(0, len(candidates), 20):
+        batch = candidates[i:i + 20]
+        query = ",".join(x[0] for x in batch)
+        try:
+            tick = requests.get(f"{base}/0/public/Ticker", params={"pair": query}, timeout=20)
+            tick.raise_for_status()
+            result = tick.json().get("result", {}) or {}
+        except Exception as exc:
+            print("Kraken ticker batch warning:", exc)
+            continue
+
+        for key, altname, wsname, base_clean, quote_clean in batch:
+            item = result.get(key) or result.get(altname)
+            if not item:
+                # Kraken sometimes returns a normalized key instead of the requested key.
+                for k, v in result.items():
+                    if k.upper() in {key.upper(), altname.upper(), (wsname or "").replace("/", "").upper()}:
+                        item = v
+                        break
+            if not item:
+                continue
+            last = safe_float((item.get("c") or [0])[0])
+            open_price = safe_float((item.get("o") or [0])[0])
+            volume_base = safe_float((item.get("v") or [0, 0])[-1])
+            change = ((last / open_price) - 1.0) * 100.0 if open_price else 0.0
+            quote_volume = volume_base * last
+            if abs(change) < SCAN_MIN_CHANGE and quote_volume < 5_000_000:
+                continue
+            symbol = f"{base_clean}USDT"
+            rows.append({
+                "symbol": symbol,
+                "display_pair": wsname or altname,
+                "market": "crypto",
+                "provider": "Kraken Public API",
+                "price": last,
+                "change_24h": change,
+                "volume_quote_24h": quote_volume,
+                "score": _scanner_score(change, quote_volume),
+            })
+
+    rows.sort(key=lambda x: (x["score"], x["volume_quote_24h"]), reverse=True)
+    # Deduplicate synthetic USDT symbols when Kraken exposes several quote variants.
+    seen = set()
+    out = []
+    for row in rows:
+        if row["symbol"] in seen:
+            continue
+        seen.add(row["symbol"])
+        out.append(row)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def discover_us_market(limit=None):
+    limit = max(1, int(limit or SCAN_US_LIMIT))
+    try:
+        import yfinance as yf
+    except Exception as exc:
+        print("yfinance import warning:", exc)
+        return []
+
+    rows_by_symbol = {}
+    for screen_name in ("most_actives", "day_gainers", "day_losers"):
+        try:
+            screen = yf.screen(screen_name, count=min(250, max(50, limit * 2)))
+            quotes = (screen or {}).get("quotes", []) if isinstance(screen, dict) else []
+            for q in quotes:
+                symbol = str(q.get("symbol") or "").upper().strip()
+                if not symbol:
+                    continue
+                price = safe_float(q.get("regularMarketPrice"))
+                change = safe_float(q.get("regularMarketChangePercent"))
+                volume = safe_float(q.get("regularMarketVolume"))
+                market_cap = safe_float(q.get("marketCap"))
+                if not (price or change or volume):
+                    continue
+                if abs(change) < SCAN_MIN_CHANGE and volume < 1_000_000:
+                    continue
+                rows_by_symbol[symbol] = {
+                    "symbol": symbol,
+                    "market": "us_equity",
+                    "provider": "Yahoo Finance / yfinance",
+                    "price": price,
+                    "change_24h": change,
+                    "volume_24h": volume,
+                    "market_cap": market_cap,
+                    "score": _scanner_score(change, volume * price, market_cap),
+                }
+        except Exception as exc:
+            print(f"Yahoo screen {screen_name} warning:", exc)
+
+    rows = list(rows_by_symbol.values())
+    rows.sort(key=lambda x: (x["score"], x.get("volume_24h", 0)), reverse=True)
+    return rows[:limit]
+
+
+def scan_whole_market():
+    crypto = discover_crypto_market(SCAN_CRYPTO_LIMIT)
+    equities = discover_us_market(SCAN_US_LIMIT)
+    candidates = crypto + equities
+    candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+    deep = []
+    for candidate in candidates[:max(1, SCAN_DEEP_ANALYSIS)]:
+        symbol = candidate["symbol"]
+        try:
+            snapshot = run_analysis(symbol, "15m", 200)
+            deep.append({
+                "symbol": symbol,
+                "market": candidate.get("market"),
+                "provider": candidate.get("provider"),
+                "discovery": candidate,
+                "analysis": snapshot,
+                "error": "",
+            })
+        except Exception as exc:
+            deep.append({
+                "symbol": symbol,
+                "market": candidate.get("market"),
+                "provider": candidate.get("provider"),
+                "discovery": candidate,
+                "analysis": None,
+                "error": str(exc),
+            })
+
+    return {
+        "crypto_candidates": crypto,
+        "us_equity_candidates": equities,
+        "candidate_count": len(candidates),
+        "deep_analysis": deep,
+        "scanned_at": time.time(),
+    }
+
+
+def scanner_message(result):
+    crypto = result.get("crypto_candidates", [])
+    equities = result.get("us_equity_candidates", [])
+    deep = result.get("deep_analysis", [])
+    lines = [
+        "🔎 ROBI — فحص السوق الواسع",
+        "",
+        f"🪙 Crypto المكتشفة: {len(crypto)} — Kraken Public API",
+        f"📈 الأسهم الأمريكية المكتشفة: {len(equities)} — Yahoo Finance/yfinance",
+        f"🧠 التحليل العميق: {len(deep)} مرشحًا",
+        "",
+        "أعلى المرشحين للتحليل:",
+    ]
+    if not deep:
+        lines.append("• لم ينجح أي مرشح في الوصول إلى محرك التحليل.")
+    for item in deep[:SCAN_NOTIFY_TOP]:
+        d = item.get("discovery") or {}
+        snap = item.get("analysis") or {}
+        change = safe_float(d.get("change_24h"))
+        if snap:
+            lines.append(
+                f"• {item['symbol']} | {change:+.2f}% | "
+                f"الحالة: {snap.get('state', 'WAIT')} | الاتجاه: {snap.get('trend', 'unknown')}"
+            )
+        else:
+            lines.append(f"• {item['symbol']} | {change:+.2f}% | خطأ التحليل: {item.get('error', 'unknown')[:120]}")
+    lines += [
+        "",
+        "📌 الاكتشاف والترتيب هنا للمراقبة فقط، وليس إشارة شراء/بيع.",
+        "🚫 التداول الحقيقي: معطّل.",
+    ]
+    return "\n".join(lines)
+
+
+# ------------------------------------------------------------
 # Periodic market monitor
 # ------------------------------------------------------------
 
@@ -475,36 +695,33 @@ def monitor_loop():
     global monitoring
 
     while monitoring:
-        for symbol in DEFAULT_SYMBOLS:
-            if not monitoring:
-                break
-
-            try:
-                snapshot = run_analysis(symbol, "15m", 200)
+        try:
+            result = scan_whole_market()
+            deep = result.get("deep_analysis", [])
+            for item in deep:
+                snapshot = item.get("analysis")
+                if not snapshot:
+                    continue
+                symbol = item.get("symbol", "")
                 state = snapshot.get("state", "WAIT")
                 trend = snapshot.get("trend", "unknown")
                 patterns = ",".join(pattern_names(snapshot))
-
                 signature = f"{state}|{trend}|{patterns}"
                 previous = last_monitor_state.get(symbol)
-
                 record_monitor_event(snapshot)
                 last_monitor_state[symbol] = signature
-
-                # Only notify on a change, to avoid Telegram spam.
                 if previous is not None and previous != signature and TOKEN:
-                    # chat_id is configured through ROBI_MONITOR_CHAT_ID.
                     chat_id = os.getenv("ROBI_MONITOR_CHAT_ID", "").strip()
                     if chat_id:
                         send_message(
                             int(chat_id),
-                            snapshot_text(snapshot, symbol, "15m")
-                            + "\n\n🔔 تغيرت حالة المراقبة.",
+                            snapshot_text(snapshot, symbol, "15m") + "\n\n🔔 تغيرت حالة التحليل.",
                         )
-
-            except Exception as exc:
-                print(f"Monitor error {symbol}: {exc}")
-
+            chat_id = os.getenv("ROBI_MONITOR_CHAT_ID", "").strip()
+            if chat_id and TOKEN:
+                send_message(int(chat_id), scanner_message(result))
+        except Exception as exc:
+            print(f"Broad market scan error: {exc}")
         time.sleep(max(MONITOR_INTERVAL, 60))
 
 
@@ -562,6 +779,7 @@ def handle_message(message: dict):
                 "/news\n"
                 "/news BTCUSDT\n"
                 "/flow BTCUSDT\n"
+                "/scan\n"
                 "/monitor\n"
                 "/stopmonitor\n"
                 "/status\n"
@@ -576,7 +794,8 @@ def handle_message(message: dict):
                 "/analyze SYMBOL [TIMEFRAME] - تحليل السوق (AAPL / TSLA / BTCUSDT...)\n"
                 "/news [SYMBOL] - آخر الأخبار\n"
                 "/flow SYMBOL - تدفق الصفقات\n"
-                "/monitor - تشغيل المراقبة\n"
+                "/scan - فحص السوق الواسع الآن\n"
+                "/monitor - تشغيل المراقبة الواسعة\n"
                 "/stopmonitor - إيقاف المراقبة\n"
                 "/status - حالة ROBI\n"
                 "/pause - إيقاف Paper Trading\n"
@@ -608,13 +827,20 @@ def handle_message(message: dict):
             paused = False
             send_message(chat_id, "▶️ تم تشغيل Paper Trading.")
 
+        elif command == "/scan":
+            send_message(chat_id, "🔎 جاري فحص السوق الواسع من المصادر العامة...\nقد يستغرق قليلًا.")
+            result = scan_whole_market()
+            send_message(chat_id, scanner_message(result))
+
         elif command == "/monitor":
             if start_monitor():
                 send_message(
                     chat_id,
-                    "🟢 ROBI بدأ مراقبة السوق.\n"
-                    f"الأزواج: {', '.join(DEFAULT_SYMBOLS)}\n"
-                    f"الفاصل: {MONITOR_INTERVAL} ثانية\n"
+                    "🟢 ROBI بدأ مراقبة السوق الواسع.\n"
+                    "🪙 Crypto: Kraken Public API\n"
+                    "📈 US equities: Yahoo Finance / yfinance\n"
+                    f"🧠 Deep analysis: {SCAN_DEEP_ANALYSIS} مرشحين كل دورة\n"
+                    f"⏱ الفاصل: {MONITOR_INTERVAL} ثانية\n"
                     "🔔 التنبيه عند تغيّر حالة التحليل.",
                 )
             else:
@@ -711,6 +937,7 @@ def home():
     <p>Real trading: <b>DISABLED</b></p>
     <p>Market analysis: candles, patterns, windows, indicators,
        support/resistance, volume, trade flow and news.</p>
+    <p><b>Broad scanner: Kraken crypto + Yahoo Finance US equities</b></p>
     <p><b>Public market data: EXTERNAL ONLY</b></p>
     <p>Crypto source: <b>Kraken Public API</b></p>
     <p>US equities source: <b>Yahoo Finance / yfinance</b></p>
@@ -738,6 +965,12 @@ def health():
         "crypto_provider": "Kraken Public API",
         "us_equity_provider": "Yahoo Finance / yfinance",
         "private_exchange_api": False,
+        "scanner": {
+            "crypto_limit": SCAN_CRYPTO_LIMIT,
+            "us_equity_limit": SCAN_US_LIMIT,
+            "deep_analysis": SCAN_DEEP_ANALYSIS,
+            "min_change_percent": SCAN_MIN_CHANGE,
+        },
     }
 
 
@@ -757,6 +990,12 @@ def market_test(symbol: str = "BTCUSDT", timeframe: str = "15m", limit: int = 20
             "us_equity_provider": "Yahoo Finance / yfinance",
             "private_exchange_api": False,
         }
+
+
+@app.get("/scan")
+def scan_http():
+    result = scan_whole_market()
+    return result
 
 
 @app.get("/analyze")
