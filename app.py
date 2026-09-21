@@ -189,7 +189,7 @@ def handle_message(message: dict):
         parts = text.split()
         symbol = parts[1] if len(parts) > 1 else "BTCUSDT"
 
-        try:
+                try:
             ticker = get_binance_ticker(symbol)
             price = float(ticker.get("lastPrice", 0))
             change = float(ticker.get("priceChangePercent", 0))
@@ -197,19 +197,19 @@ def handle_message(message: dict):
 
             send_message(
                 chat_id,
-                f"📈 Binance — {symbol.upper()}\n\n"
+                f"📈 Binance — {symbol.upper()}\n"
                 f"السعر: {price:,.8f}\n"
                 f"24h: {change:+.2f}%\n"
                 f"حجم 24h: ${volume:,.0f}\n\n"
-                "🔐 قراءة بيانات فقط — لا يوجد تداول.",
+                "🔐 قراءة بيانات فقط — لا يوجد تداول."
             )
-    except Exception as exc:
-        print("Ticker error:", repr(exc))
-        send_message(
-            chat_id,
-            f"⚠️ تعذر جلب بيانات {symbol.upper()}.\n"
-            f"الخطأ: {type(exc).__name__}: {str(exc)[:500]}"
-        )
+        except Exception as exc:
+            print("Ticker error:", repr(exc))
+            send_message(
+                chat_id,
+                f"⚠️ تعذر جلب بيانات {symbol.upper()}.\n"
+                f"الخطأ: {type(exc).__name__}: {str(exc)[:500]}"
+            )
     elif command == "/pause":
         paused = True
         send_message(chat_id, "⏸ تم إيقاف Paper Trading.")
