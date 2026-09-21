@@ -203,10 +203,13 @@ def handle_message(message: dict):
                 f"حجم 24h: ${volume:,.0f}\n\n"
                 "🔐 قراءة بيانات فقط — لا يوجد تداول.",
             )
-        except Exception:
-            send_message(
-                chat_id,
-                f"⚠️ تعذر جلب بيانات {symbol.upper()}."
+        except Exception as exc:
+    print("Ticker error:", repr(exc))
+    send_message(
+        chat_id,
+        f"⚠️ تعذر جلب بيانات {symbol.upper()}.\n"
+        f"الخطأ: {type(exc).__name__}: {str(exc)[:500]}"
+    )
             )
 
     elif command == "/pause":
