@@ -71,24 +71,64 @@ try:
     )
     from robi_engine.news_engine import fetch_news, latest_news, init_db
     try:
-        from robi_engine.live_data import market_provider_status
+        from robi_engine.live_data import (
+            get_klines,
+            get_ticker,
+            market_kind,
+            market_provider_status,
+        )
     except Exception:
         def market_provider_status():
-            return {"configured": "unknown", "active_order": [], "private_api": False}
+            return {
+                "configured": "unknown",
+                "routing": {
+                    "crypto": "kraken_public",
+                    "us_equity": "yahoo_finance_yfinance",
+                },
+                "real_trading": False,
+                "private_api": False,
+            }
+        def market_kind(symbol):
+            return "unknown"
+        def get_klines(*args, **kwargs):
+            raise RuntimeError("Market data adapter unavailable")
+        def get_ticker(*args, **kwargs):
+            raise RuntimeError("Market data adapter unavailable")
     ENGINE_READY = True
     ENGINE_IMPORT_ERROR = ""
 except Exception as exc:
     ENGINE_READY = False
     ENGINE_IMPORT_ERROR = repr(exc)
+    _ENGINE_IMPORT_FAILURE = str(exc)
 
     def init_db():
         return None
 
     def fetch_news(limit=20):
-        raise RuntimeError(f"ROBI news engine unavailable: {exc}")
+        raise RuntimeError(f"ROBI news engine unavailable: {_ENGINE_IMPORT_FAILURE}")
 
     def latest_news(limit=10):
         return []
+
+    def market_provider_status():
+        return {
+            "configured": "unavailable",
+            "routing": {
+                "crypto": "kraken_public",
+                "us_equity": "yahoo_finance_yfinance",
+            },
+            "real_trading": False,
+            "private_api": False,
+        }
+
+    def market_kind(symbol):
+        return "unknown"
+
+    def get_klines(*args, **kwargs):
+        raise RuntimeError("ROBI market-data adapter is unavailable")
+
+    def get_ticker(*args, **kwargs):
+        raise RuntimeError("ROBI market-data adapter is unavailable")
 
 # ------------------------------------------------------------
 # Database
@@ -250,6 +290,57 @@ def snapshot_text(snapshot, symbol, timeframe):
     ]
 
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------
+# Public market-data status / routing
+# ------------------------------------------------------------
+
+def market_status():
+    """Return an explicit, human-readable public-data routing status."""
+    try:
+        status = dict(market_provider_status() or {})
+    except Exception as exc:
+        status = {"configured": "error", "routing": {}, "error": str(exc)}
+
+    routing = status.get("routing") or {}
+    status.setdefault("configured", "auto")
+    status["routing"] = {
+        "crypto": routing.get("crypto", "kraken_public"),
+        "us_equity": routing.get("us_equity", "yahoo_finance_yfinance"),
+    }
+    status["real_trading"] = False
+    status["private_api"] = False
+    return status
+
+
+def market_provider_text():
+    status = market_status()
+    configured = str(status.get("configured", "auto")).upper()
+    crypto = str(status["routing"]["crypto"])
+    equities = str(status["routing"]["us_equity"])
+    return (
+        f"AUTO ({configured}) — Crypto: Kraken Public API; "
+        f"US equities: Yahoo Finance/yfinance "
+        f"[routes: {crypto}, {equities}]"
+    )
+
+
+def public_market_test(symbol="BTCUSDT", timeframe="15m", limit=20):
+    """Actually contact the configured public market-data adapter."""
+    symbol = symbol.upper().strip()
+    candles = get_klines(symbol, timeframe, limit)
+    ticker = get_ticker(symbol)
+    return {
+        "ok": bool(candles and ticker),
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "market_kind": market_kind(symbol),
+        "provider": ticker.get("provider", "unknown") if isinstance(ticker, dict) else "unknown",
+        "candles_received": len(candles),
+        "last_price": safe_float(ticker.get("lastPrice")) if isinstance(ticker, dict) else None,
+        "price_change_percent": safe_float(ticker.get("priceChangePercent")) if isinstance(ticker, dict) else None,
+    }
 
 
 # ------------------------------------------------------------
@@ -608,15 +699,21 @@ def handle_message(message: dict):
 
 @app.get("/", response_class=HTMLResponse)
 def home():
+    status = market_status()
     return f"""
     <h2>🤖 ROBI Trading Bot</h2>
     <p>Integrated research / paper-trading service is running.</p>
     <p>Engine: {"READY" if ENGINE_READY else "ERROR"}</p>
     <p>Monitoring: {"ON" if monitoring else "OFF"}</p>
-    <p>Real trading: DISABLED</p>
+    <p>Real trading: <b>DISABLED</b></p>
     <p>Market analysis: candles, patterns, windows, indicators,
        support/resistance, volume, trade flow and news.</p>
-    <p>Public market data provider: {market_provider_status().get("configured", "unknown").upper()}</p>
+    <p><b>Public market data: EXTERNAL ONLY</b></p>
+    <p>Crypto source: <b>Kraken Public API</b></p>
+    <p>US equities source: <b>Yahoo Finance / yfinance</b></p>
+    <p>Configured mode: <b>{str(status.get("configured", "auto")).upper()}</b></p>
+    <p>Private exchange API: <b>DISABLED</b></p>
+    <p><a href="/health">Health</a> &nbsp; | &nbsp; <a href="/market-test?symbol=BTCUSDT&timeframe=15m">Test BTCUSDT data</a></p>
     """
 
 
@@ -630,11 +727,33 @@ def health():
         "public_url": PUBLIC_URL,
         "webhook_url": f"{PUBLIC_URL}/telegram/webhook",
         "monitoring": monitoring,
-        "real_trading_enabled": REAL_TRADING_ENABLED,
+        "real_trading_enabled": False,
         "paper_trading": True,
         "database": DB_PATH,
-        "market_data": market_provider_status(),
+        "market_data": market_status(),
+        "market_data_policy": "external_public_only",
+        "crypto_provider": "Kraken Public API",
+        "us_equity_provider": "Yahoo Finance / yfinance",
+        "private_exchange_api": False,
     }
+
+
+@app.get("/market-test")
+def market_test(symbol: str = "BTCUSDT", timeframe: str = "15m", limit: int = 20):
+    try:
+        return public_market_test(symbol, timeframe, max(1, min(limit, 200)))
+    except Exception as exc:
+        return {
+            "ok": False,
+            "symbol": symbol.upper(),
+            "timeframe": timeframe,
+            "market_kind": market_kind(symbol),
+            "error": str(exc),
+            "market_data_policy": "external_public_only",
+            "crypto_provider": "Kraken Public API",
+            "us_equity_provider": "Yahoo Finance / yfinance",
+            "private_exchange_api": False,
+        }
 
 
 @app.get("/analyze")
