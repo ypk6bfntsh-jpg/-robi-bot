@@ -46,6 +46,7 @@ def binance_public_get(path: str, params: dict | None = None):
         params=params or {},
         timeout=15,
     )
+  print("BINANCE PUBLIC DEBUG:", response.status_code, response.text[:1000])
     response.raise_for_status()
     return response.json()
 
