@@ -559,7 +559,7 @@ def discover_crypto_market(limit=None):
             quote_volume = volume_base * last
             if abs(change) < SCAN_MIN_CHANGE and quote_volume < 5_000_000:
                 continue
-            symbol = f"{base_clean}{quote_clean}"
+            symbol = f"{base_clean}USDT"
             rows.append({
                 "symbol": symbol,
                 "display_pair": wsname or altname,
@@ -572,7 +572,7 @@ def discover_crypto_market(limit=None):
             })
 
     rows.sort(key=lambda x: (x["score"], x["volume_quote_24h"]), reverse=True)
-    # Deduplicate exact Kraken symbols while preserving the actual quote currency.
+    # Deduplicate synthetic USDT symbols when Kraken exposes several quote variants.
     seen = set()
     out = []
     for row in rows:
