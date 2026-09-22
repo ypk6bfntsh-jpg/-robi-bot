@@ -80,6 +80,17 @@ def build_confluence(snapshot):
     supporting = []
 
     trend = str(snapshot.get("trend") or "unknown").lower()
+    news_analysis = _mapping(snapshot.get("news_analysis"))
+    news_direction = str(news_analysis.get("direction") or "none").lower()
+
+    if news_direction == "positive":
+        bullish.append("الأخبار المرتبطة تميل للإيجابية")
+    elif news_direction == "negative":
+        bearish.append("الأخبار المرتبطة تميل للسلبية")
+    if news_direction == "positive" and trend == "down":
+        conflicts.append("الاتجاه هابط، لكن الأخبار المرتبطة تميل للإيجابية.")
+    elif news_direction == "negative" and trend == "up":
+        conflicts.append("الاتجاه صاعد، لكن الأخبار المرتبطة تميل للسلبية.")
     state = str(snapshot.get("state") or "WAIT").upper()
 
     if trend == "up" and bearish:
@@ -164,6 +175,8 @@ def build_confluence(snapshot):
         "bearish_count": len(bearish),
         "neutral_count": len(neutral),
         "warning_count": len(warnings),
+        "news_direction": news_direction,
+        "news_count": int(news_analysis.get("count") or 0),
         "agreement": agreement,
         "supporting": supporting,
         "conflicts": conflicts,
