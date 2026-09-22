@@ -80,7 +80,7 @@ try:
     )
     from robi_engine.explainability import build_explainability
     from robi_engine.confluence import build_confluence
-    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news, analyze_news
+    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news
     try:
         from robi_engine.live_data import (
             get_klines,
@@ -265,6 +265,97 @@ def ar_news_direction(value):
         "mixed": "مختلط",
         "none": "لا توجد أخبار",
     }.get(str(value).lower(), str(value))
+
+def summarize_news_for_analysis(rows):
+    """تلخيص الأخبار بشكل متوافق مع السجلات القديمة والجديدة."""
+    rows = rows or []
+    positive = negative = neutral = 0
+    confidence_values = []
+
+    positive_words = (
+        "rises", "rising", "growth", "beats", "beat estimates",
+        "upgrade", "upgraded", "gains", "gain", "dividend",
+        "buyback", "strong earnings", "record revenue",
+        "raises outlook", "raised outlook", "partnership", "demand"
+    )
+    negative_words = (
+        "falls", "falling", "drops", "drop", "decline", "declines",
+        "downgrade", "downgraded", "misses", "missed estimates",
+        "lawsuit", "investigation", "probe", "recall", "warning"
+    )
+
+    for item in rows:
+        sentiment = str(item.get("sentiment") or "").strip().lower()
+        sentiment_ar = str(item.get("sentiment_ar") or "").strip()
+        title = str(item.get("title") or "").lower()
+
+        if sentiment not in {"positive", "negative", "neutral"}:
+            if "إيجابي" in sentiment_ar:
+                sentiment = "positive"
+            elif "سلبي" in sentiment_ar:
+                sentiment = "negative"
+            elif "محايد" in sentiment_ar:
+                sentiment = "neutral"
+            elif any(word in title for word in positive_words):
+                sentiment = "positive"
+            elif any(word in title for word in negative_words):
+                sentiment = "negative"
+            else:
+                sentiment = "neutral"
+
+        if sentiment == "positive":
+            positive += 1
+        elif sentiment == "negative":
+            negative += 1
+        else:
+            neutral += 1
+
+        try:
+            value = float(item.get("confidence") or 0)
+            if value > 0:
+                confidence_values.append(value)
+        except (TypeError, ValueError):
+            pass
+
+    total = positive + negative + neutral
+
+    if positive > negative:
+        direction = "positive"
+        direction_ar = "إيجابي"
+        impact_ar = "داعم للسهم"
+    elif negative > positive:
+        direction = "negative"
+        direction_ar = "سلبي"
+        impact_ar = "ضاغط على السهم"
+    elif positive == negative and positive > 0:
+        direction = "mixed"
+        direction_ar = "مختلط"
+        impact_ar = "متضارب"
+    elif total:
+        direction = "none"
+        direction_ar = "محايد"
+        impact_ar = "غير واضح"
+    else:
+        direction = "none"
+        direction_ar = "لا توجد أخبار"
+        impact_ar = "غير واضح"
+
+    confidence = (
+        round(sum(confidence_values) / len(confidence_values), 2)
+        if confidence_values else
+        (round(max(positive, negative) / total, 2) if total else 0.0)
+    )
+
+    return {
+        "direction": direction,
+        "direction_ar": direction_ar,
+        "impact_ar": impact_ar,
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "confidence": confidence,
+    }
+
 def ar_confluence_state(value):
     return {
         "up": "صاعد",
@@ -548,7 +639,7 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
     except Exception as exc:
         print("News fetch warning:", exc)
     snapshot["news"] = news_for_symbol(symbol, 10)
-    snapshot["news_analysis"] = analyze_news(snapshot["news"])
+    snapshot["news_analysis"] = summarize_news_for_analysis(snapshot["news"])
     snapshot["explainability"] = build_explainability(snapshot)
     snapshot["confluence"] = build_confluence(snapshot)
     ensure_db()
