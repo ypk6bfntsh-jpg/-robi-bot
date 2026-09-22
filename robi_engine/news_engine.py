@@ -348,7 +348,7 @@ def latest_news(limit=10, query=None):
     return [dict(r) for r in rows]
 
 def analyze_news(rows):
-    """تلخيص اتجاه مجموعة الأخبار ليستخدمه ROBI في التحليل والتوافق."""
+    """تلخيص اتجاه الأخبار مع دعم البيانات القديمة والجديدة."""
     rows = rows or []
     if not rows:
         return {
@@ -358,29 +358,69 @@ def analyze_news(rows):
             "negative": 0,
             "neutral": 0,
             "confidence": 0.0,
+            "impact_ar": "غير واضح",
         }
 
-    positive = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "positive")
-    negative = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "negative")
-    neutral = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "neutral")
+    positive = 0
+    negative = 0
+    neutral = 0
+    confidences = []
+
+    for r in rows:
+        sentiment = str(r.get("sentiment") or "").strip().lower()
+        sentiment_ar = str(r.get("sentiment_ar") or "").strip()
+
+        # دعم السجلات القديمة التي قد لا تحتوي sentiment.
+        if sentiment not in {"positive", "negative", "neutral"}:
+            if "إيجابي" in sentiment_ar:
+                sentiment = "positive"
+            elif "سلبي" in sentiment_ar:
+                sentiment = "negative"
+            elif "محايد" in sentiment_ar:
+                sentiment = "neutral"
+            else:
+                title = str(r.get("title") or "").lower()
+                if any(x in title for x in ("rises", "growth", "beats", "upgrade", "dividend", "gains")):
+                    sentiment = "positive"
+                elif any(x in title for x in ("falls", "drops", "downgrade", "misses", "lawsuit")):
+                    sentiment = "negative"
+                else:
+                    sentiment = "neutral"
+
+        if sentiment == "positive":
+            positive += 1
+        elif sentiment == "negative":
+            negative += 1
+        else:
+            neutral += 1
+
+        try:
+            confidences.append(float(r.get("confidence") or 0))
+        except (TypeError, ValueError):
+            pass
 
     total = positive + negative + neutral
+
     if positive > negative:
         direction = "positive"
         direction_ar = "إيجابي"
+        impact_ar = "داعم للسهم"
     elif negative > positive:
         direction = "negative"
         direction_ar = "سلبي"
+        impact_ar = "ضاغط على السهم"
     elif positive == negative and positive > 0:
         direction = "mixed"
         direction_ar = "مختلط"
+        impact_ar = "متضارب"
     else:
         direction = "none"
         direction_ar = "محايد"
+        impact_ar = "غير واضح"
 
-    confidence = 0.0
-    if total:
-        confidence = round(max(positive, negative) / total, 2)
+    confidence = round(sum(confidences) / len(confidences), 2) if confidences else (
+        round(max(positive, negative) / total, 2) if total else 0.0
+    )
 
     return {
         "direction": direction,
@@ -389,6 +429,7 @@ def analyze_news(rows):
         "negative": negative,
         "neutral": neutral,
         "confidence": confidence,
+        "impact_ar": impact_ar,
     }
 
 
