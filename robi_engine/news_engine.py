@@ -33,13 +33,81 @@ POSITIVE = {
     "growth", "record", "upgrade", "upgraded", "approval", "approved",
     "strong", "profit", "profits", "revenue growth", "bullish", "partnership",
     "contract", "launch", "expands", "expansion", "positive", "outperform",
+    "dividend", "dividends", "buyback", "raises guidance", "raised guidance",
 }
 NEGATIVE = {
     "falls", "fall", "drops", "drop", "loss", "losses", "downgrade", "downgraded",
     "warning", "lawsuit", "investigation", "probe", "recall", "cuts", "cut",
     "weak", "decline", "declines", "miss", "misses", "negative", "fraud",
     "layoffs", "delay", "delays", "bearish", "fine", "ban", "shutdown",
+    "default", "bankruptcy", "slump", "plunge", "plunges",
 }
+
+# كلمات لا ينبغي اعتبارها سلبية تلقائيًا لأنها قد تصف سياقًا عامًا لا أثرًا ماليًا مباشرًا.
+CONTEXT_NEUTRAL = {
+    "fearing", "fear", "concern", "concerns", "ai fears", "ai fear",
+    "americans fearing", "debate", "discussion", "what investors should know",
+}
+
+SENTIMENT_AR = {
+    "positive": "إيجابي",
+    "negative": "سلبي",
+    "neutral": "محايد",
+}
+
+CONFIDENCE_AR = {
+    "high": "مرتفعة",
+    "medium": "متوسطة",
+    "low": "منخفضة",
+}
+
+def _classify(title, summary=""):
+    text = f"{title} {summary}".lower()
+    pos_hits = sorted({x for x in POSITIVE if x in text})
+    neg_hits = sorted({x for x in NEGATIVE if x in text})
+    context_hits = sorted({x for x in CONTEXT_NEUTRAL if x in text})
+
+    pos = len(pos_hits)
+    neg = len(neg_hits)
+
+    if pos > neg:
+        sentiment = "positive"
+    elif neg > pos:
+        sentiment = "negative"
+    else:
+        sentiment = "neutral"
+
+    difference = abs(pos - neg)
+    if difference >= 2:
+        confidence = "high"
+    elif difference == 1:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    if sentiment == "positive":
+        reason = "تم التصنيف كإيجابي بسبب مؤشرات مثل: " + ", ".join(pos_hits[:4])
+    elif sentiment == "negative":
+        reason = "تم التصنيف كسلبي بسبب مؤشرات مثل: " + ", ".join(neg_hits[:4])
+    else:
+        if context_hits:
+            reason = "العنوان يحمل سياقًا أو مخاوف عامة دون إشارة مالية واضحة."
+        else:
+            reason = "لم تظهر مؤشرات إيجابية أو سلبية كافية في العنوان والملخص."
+
+    # لا نرفع الثقة بسبب كلمة سياقية عامة مثل fearing وحدها.
+    if sentiment == "neutral" and context_hits:
+        confidence = "low"
+
+    return {
+        "sentiment": sentiment,
+        "sentiment_ar": SENTIMENT_AR[sentiment],
+        "confidence": confidence,
+        "confidence_ar": CONFIDENCE_AR[confidence],
+        "reason_ar": reason,
+        "positive_hits": pos_hits,
+        "negative_hits": neg_hits,
+    }
 
 
 def _db():
@@ -151,7 +219,9 @@ def fetch_news(limit=20, symbol=None):
             continue
         seen.add(url)
         assets = _asset_matches(item["title"] + " " + item.get("summary", ""))
-        sentiment, impact = _classify(item["title"], item.get("summary", ""))
+        classification = _classify(item["title"], item.get("summary", ""))
+        sentiment = classification["sentiment"]
+        impact = classification["confidence"]
         con.execute("""INSERT INTO news(title,source,url,published,fetched_at,summary,assets,sentiment,impact)
             VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET
             title=excluded.title, source=excluded.source, published=excluded.published,
@@ -179,7 +249,16 @@ def latest_news(limit=10, symbol=None):
         rows = con.execute("SELECT title,source,url,published,summary,assets,sentiment,impact FROM news WHERE fetched_at>=? ORDER BY fetched_at DESC LIMIT ?", (cutoff, limit)).fetchall()
     con.close()
     keys = ["title","source","url","published","summary","assets","sentiment","impact"]
-    return [dict(zip(keys, row)) for row in rows]
+    out = []
+    for row in rows:
+        item = dict(zip(keys, row))
+        classification = _classify(item.get("title", ""), item.get("summary", ""))
+        item["sentiment_ar"] = classification["sentiment_ar"]
+        item["confidence_ar"] = classification["confidence_ar"]
+        item["reason_ar"] = classification["reason_ar"]
+        item["confidence"] = classification["confidence"]
+        out.append(item)
+    return out
 
 
 def analyze_news(news):
@@ -193,5 +272,13 @@ def analyze_news(news):
         direction = "negative"
     else:
         direction = "mixed" if news else "none"
-    return {"count": len(news), "positive": positive, "negative": negative, "neutral": neutral, "direction": direction,
-            "summary": "لا توجد أخبار مرتبطة." if not news else f"الأخبار المرتبطة: {positive} إيجابية، {negative} سلبية، {neutral} محايدة. التصنيف آلي بالكلمات المفتاحية."}
+    direction_ar = {"positive": "إيجابي", "negative": "سلبي", "mixed": "مختلط", "none": "لا توجد أخبار"}[direction]
+    return {
+        "count": len(news),
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "direction": direction,
+        "direction_ar": direction_ar,
+        "summary": "لا توجد أخبار مرتبطة." if not news else f"الأخبار المرتبطة: {positive} إيجابية، {negative} سلبية، {neutral} محايدة.",
+    }
