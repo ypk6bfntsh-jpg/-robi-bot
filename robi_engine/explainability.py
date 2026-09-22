@@ -110,15 +110,18 @@ def build_explainability(snapshot):
     # Volume context.
     volume = snapshot.get("volume") or {}
     spike = bool(volume.get("spike"))
+    current_volume = _num(volume.get("current"))
     relative = _num(volume.get("relative"))
-    if spike:
+    if current_volume is None or current_volume <= 0 or relative is None or relative <= 0:
+        warnings.append("بيانات الحجم غير متاحة أو غير صالحة لهذه اللقطة")
+    elif spike:
         if trend == "up":
             bullish.append("ارتفاع واضح في الحجم مع اتجاه صاعد")
         elif trend == "down":
             bearish.append("ارتفاع واضح في الحجم مع اتجاه هابط")
         else:
             neutral.append("ارتفاع واضح في الحجم مع اتجاه غير محسوم")
-    elif relative is not None and relative < 0.5:
+    elif relative < 0.5:
         warnings.append(f"الحجم الحالي منخفض نسبيًا ({relative:.2f})")
 
     # Trade-flow context when available.
