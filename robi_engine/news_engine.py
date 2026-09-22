@@ -80,6 +80,47 @@ IGNORE_ALONE = {
     "risk", "risks", "ai", "artificial intelligence",
 }
 
+
+def _parse_published(value):
+    """تحويل وقت الخبر إلى وقت UTC. يدعم RFC822 وISO8601."""
+    if not value:
+        return None
+    value = str(value).strip()
+    try:
+        from email.utils import parsedate_to_datetime
+        dt = parsedate_to_datetime(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+
+    try:
+        normalized = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _is_fresh(item, max_age_hours=24):
+    """هل الخبر حديث بما يكفي للتحليل الحالي؟"""
+    dt = _parse_published(item.get("published"))
+    if dt is None:
+        return False
+    age_seconds = (datetime.now(timezone.utc) - dt).total_seconds()
+    return 0 <= age_seconds <= max_age_hours * 3600
+
+def fresh_news(rows, max_age_hours=24, limit=10):
+    """إرجاع الأخبار الحديثة فقط، مرتبة من الأحدث للأقدم."""
+    fresh = [row for row in (rows or []) if _is_fresh(row, max_age_hours)]
+    fresh.sort(
+        key=lambda row: _parse_published(row.get("published")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return fresh[:limit]
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -328,7 +369,7 @@ def fetch_news(limit=20, query="NVIDIA OR NVDA", symbol=None):
     except Exception:
         return []
 
-def latest_news(limit=10, query=None):
+def latest_news(limit=10, query=None, max_age_hours=None):
     """قراءة الأخبار المخزنة. لا تعتمد على إعادة الجلب."""
     init_db()
     conn = sqlite3.connect(DB_PATH)
@@ -345,7 +386,10 @@ def latest_news(limit=10, query=None):
             "SELECT * FROM news ORDER BY id DESC LIMIT ?", (int(limit),)
         ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    result = [dict(r) for r in rows]
+    if max_age_hours is not None:
+        result = fresh_news(result, max_age_hours=max_age_hours, limit=limit)
+    return result
 
 def analyze_news(rows):
     """تلخيص اتجاه الأخبار مع دعم البيانات القديمة والجديدة."""
@@ -471,11 +515,28 @@ def build_news_impact(rows):
     }
 
 
-def search_news(query, limit=10):
+def news_stats():
+    """إحصاءات بسيطة تفصل بين السجل التاريخي والأخبار الحديثة."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM news ORDER BY id DESC").fetchall()
+    conn.close()
+
+    all_rows = [dict(r) for r in rows]
+    fresh = fresh_news(all_rows, 24, limit=10000)
+    return {
+        "total_stored": len(all_rows),
+        "fresh_24h": len(fresh),
+        "old": max(0, len(all_rows) - len(fresh)),
+    }
+
+
+def search_news(query, limit=10, max_age_hours=None):
     """جلب أخبار تخص أصلًا محددًا، ثم إرجاع المخزن منها."""
     rows = fetch_news(limit=limit, query=query)
     if rows:
         return rows
-    return latest_news(limit=limit, query=query)
+    return latest_news(limit=limit, query=query, max_age_hours=max_age_hours)
 
 init_db()
