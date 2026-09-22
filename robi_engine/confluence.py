@@ -71,7 +71,10 @@ def build_confluence(snapshot):
     bullish = _items(explanation.get("bullish"))
     bearish = _items(explanation.get("bearish"))
     neutral = _items(explanation.get("neutral"))
-    warnings = _items(explanation.get("warnings"))
+    # Confluence warnings are independent from Explainability warnings.
+    # Explainability already renders its own warnings, so copying them here
+    # creates duplicate lines.
+    warnings = []
 
     conflicts = []
     supporting = []
@@ -125,8 +128,11 @@ def build_confluence(snapshot):
                 warnings.append("السعر قريب نسبيًا من الدعم.")
 
     volume = _mapping(snapshot.get("volume"))
+    current_volume = _num(volume.get("current"))
     relative = _num(volume.get("relative"))
-    if relative is not None and relative < 0.5:
+    if current_volume is None or current_volume <= 0 or relative is None or relative <= 0:
+        warnings.append("بيانات الحجم غير متاحة أو غير صالحة لهذه اللقطة.")
+    elif relative < 0.5:
         warnings.append(f"الحجم منخفض نسبيًا ({relative:.2f}).")
 
     bullish = _unique(bullish)
