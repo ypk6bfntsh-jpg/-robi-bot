@@ -34,6 +34,47 @@ NEGATIVE_TERMS = {
 }
 
 # كلمات لا نصنفها سلبية بمفردها لأنها قد تظهر في خبر إيجابي أو محايد.
+AR_TERM_LABELS = {
+    "rises": "ارتفاع السهم",
+    "rising": "ارتفاع",
+    "gains": "مكاسب",
+    "gain": "مكسب",
+    "growth": "نمو",
+    "demand": "طلب قوي",
+    "adoption": "زيادة التبني",
+    "partnership": "شراكة",
+    "contract": "عقد",
+    "upgrade": "ترقية التقييم",
+    "upgraded": "ترقية التقييم",
+    "dividend": "توزيعات أرباح",
+    "buyback": "إعادة شراء الأسهم",
+    "record revenue": "إيرادات قياسية",
+    "record profit": "أرباح قياسية",
+    "strong earnings": "نتائج مالية قوية",
+    "strong results": "نتائج قوية",
+    "beats estimates": "تجاوز التوقعات",
+    "beat estimates": "تجاوز التوقعات",
+    "raises outlook": "رفع التوقعات",
+    "raised outlook": "رفع التوقعات",
+    "raises guidance": "رفع التوجيهات",
+    "raised guidance": "رفع التوجيهات",
+    "falls": "انخفاض السهم",
+    "falling": "انخفاض",
+    "drops": "تراجع السهم",
+    "drop": "تراجع",
+    "decline": "تراجع",
+    "declines": "تراجع",
+    "warning": "تحذير",
+    "downgrade": "خفض التقييم",
+    "downgraded": "خفض التقييم",
+    "lawsuit": "دعوى قضائية",
+    "investigation": "تحقيق",
+    "probe": "تحقيق",
+    "recall": "استدعاء منتج",
+    "cut jobs": "خفض الوظائف",
+    "layoffs": "تسريح موظفين",
+}
+
 IGNORE_ALONE = {
     "fear", "fears", "fearing", "concern", "concerns", "concerned",
     "risk", "risks", "ai", "artificial intelligence",
@@ -154,7 +195,7 @@ def _classify(title, description=""):
             confidence = min(0.96, confidence + 0.04)
         reason = "توجد إشارات داعمة في الخبر"
         if pos_hits:
-            reason += " مثل: " + "، ".join(pos_hits[:3])
+            reason += " مثل: " + "، ".join(_arabic_terms(pos_hits[:3]))
         if neg_hits:
             reason += " مع وجود بعض الإشارات المقابلة"
         impact = "داعم للسهم"
@@ -169,7 +210,7 @@ def _classify(title, description=""):
             confidence = min(0.96, confidence + 0.04)
         reason = "توجد إشارات سلبية في الخبر"
         if neg_hits:
-            reason += " مثل: " + "، ".join(neg_hits[:3])
+            reason += " مثل: " + "، ".join(_arabic_terms(neg_hits[:3]))
         if pos_hits:
             reason += " مع وجود بعض الإشارات المقابلة"
         impact = "ضاغط على السهم"
@@ -184,6 +225,13 @@ def _classify(title, description=""):
         "الإشارات الإيجابية والسلبية متقاربة، لذلك لا يوجد اتجاه واضح."
     )
 
+
+def _arabic_terms(terms):
+    translated = []
+    for term in terms:
+        translated.append(AR_TERM_LABELS.get(str(term).lower(), "إشارة مرتبطة بالخبر"))
+    # إزالة التكرار مع الحفاظ على الترتيب
+    return list(dict.fromkeys(translated))
 
 def _confidence_ar(value):
     value = float(value or 0)
