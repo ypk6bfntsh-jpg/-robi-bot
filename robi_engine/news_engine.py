@@ -234,7 +234,7 @@ def _save(rows):
                 INSERT INTO news
                 (title,url,published,source,description,query,sentiment,confidence,
                  sentiment_ar,confidence_ar,reason_ar,impact_ar,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(url) DO UPDATE SET
                   title=excluded.title,
                   published=excluded.published,
@@ -254,7 +254,8 @@ def _save(rows):
                 row["confidence_ar"], row["reason_ar"], row.get("impact_ar", "غير واضح"), now
             ))
             saved += 1
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
+            print("News DB save warning:", exc)
             continue
     conn.commit()
     conn.close()
