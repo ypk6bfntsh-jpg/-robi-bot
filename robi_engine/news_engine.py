@@ -1,284 +1,242 @@
-"""ROBI News Engine v01.
-
-Public RSS/Google News ingestion with SQLite storage and transparent,
-rule-based news classification. No trading orders or recommendations.
-"""
-import os
-import re
 import sqlite3
-import time
-import urllib.parse
-import xml.etree.ElementTree as ET
+import hashlib
+import html
+import re
 from datetime import datetime, timezone
+from urllib.parse import quote_plus
+from xml.etree import ElementTree as ET
 
 import requests
 
-DB_PATH = os.getenv("ROBI_DB_PATH", "robi.db")
-NEWS_TIMEOUT = int(os.getenv("ROBI_NEWS_TIMEOUT", "15"))
-NEWS_MAX_AGE_HOURS = int(os.getenv("ROBI_NEWS_MAX_AGE_HOURS", "72"))
 
-ASSET_TERMS = {
-    "BTC": ["bitcoin", "btc"], "ETH": ["ethereum", "ether", "eth"],
-    "SOL": ["solana", "sol"], "XRP": ["xrp", "ripple"],
-    "BNB": ["bnb", "binance"], "AAPL": ["apple", "aapl"],
-    "TSLA": ["tesla", "tsla"], "NVDA": ["nvidia", "nvda"],
-    "MSFT": ["microsoft", "msft"], "AMZN": ["amazon", "amzn"],
-    "META": ["meta", "facebook"], "GOOGL": ["google", "alphabet", "googl"],
-    "AMD": ["amd", "advanced micro devices"], "INTC": ["intel", "intc"],
-    "MU": ["micron", "mu"], "PLTR": ["palantir", "pltr"],
+DB_PATH = "robi_news.db"
+RSS_URL = "https://news.google.com/rss/search?q={query}&hl=en-US&gl=US&ceid=US:en"
+
+# كلمات تصنيف بسيطة وشفافة. لا تعتمد على كلمة واحدة وحدها متى أمكن.
+POSITIVE_TERMS = {
+    "beats estimates": 3, "beat estimates": 3, "record revenue": 3,
+    "record profit": 3, "strong earnings": 2, "strong results": 2,
+    "raises outlook": 3, "raised outlook": 3, "raises guidance": 3,
+    "raised guidance": 3, "upgrade": 2, "upgraded": 2,
+    "buyback": 2, "dividend": 1, "growth": 1, "surge": 2,
+    "rises": 1, "rising": 1, "gains": 1, "gain": 1,
+    "partnership": 1, "contract": 1, "demand": 1,
 }
 
-POSITIVE = {
-    "beats", "beat", "surges", "surge", "rises", "rise", "gains", "gain",
-    "growth", "record", "upgrade", "upgraded", "approval", "approved",
-    "strong", "profit", "profits", "revenue growth", "bullish", "partnership",
-    "contract", "launch", "expands", "expansion", "positive", "outperform",
-    "dividend", "dividends", "buyback", "raises guidance", "raised guidance",
-}
-NEGATIVE = {
-    "falls", "fall", "drops", "drop", "loss", "losses", "downgrade", "downgraded",
-    "warning", "lawsuit", "investigation", "probe", "recall", "cuts", "cut",
-    "weak", "decline", "declines", "miss", "misses", "negative", "fraud",
-    "layoffs", "delay", "delays", "bearish", "fine", "ban", "shutdown",
-    "default", "bankruptcy", "slump", "plunge", "plunges",
+NEGATIVE_TERMS = {
+    "misses estimates": 3, "missed estimates": 3, "weak earnings": 2,
+    "weak results": 2, "lowers outlook": 3, "lowered outlook": 3,
+    "lowers guidance": 3, "lowered guidance": 3, "downgrade": 2,
+    "downgraded": 2, "lawsuit": 2, "investigation": 2,
+    "probe": 2, "recall": 2, "cut jobs": 2, "layoffs": 2,
+    "falls": 1, "falling": 1, "drops": 1, "drop": 1,
+    "decline": 1, "declines": 1, "warning": 1,
 }
 
-# كلمات لا ينبغي اعتبارها سلبية تلقائيًا لأنها قد تصف سياقًا عامًا لا أثرًا ماليًا مباشرًا.
-CONTEXT_NEUTRAL = {
-    "fearing", "fear", "concern", "concerns", "ai fears", "ai fear",
-    "americans fearing", "debate", "discussion", "what investors should know",
+# كلمات لا نصنفها سلبية بمفردها لأنها قد تظهر في خبر إيجابي أو محايد.
+IGNORE_ALONE = {
+    "fear", "fears", "fearing", "concern", "concerns", "concerned",
+    "risk", "risks", "ai", "artificial intelligence",
 }
-
-SENTIMENT_AR = {
-    "positive": "إيجابي",
-    "negative": "سلبي",
-    "neutral": "محايد",
-}
-
-CONFIDENCE_AR = {
-    "high": "مرتفعة",
-    "medium": "متوسطة",
-    "low": "منخفضة",
-}
-
-def _classify(title, summary=""):
-    text = f"{title} {summary}".lower()
-    pos_hits = sorted({x for x in POSITIVE if x in text})
-    neg_hits = sorted({x for x in NEGATIVE if x in text})
-    context_hits = sorted({x for x in CONTEXT_NEUTRAL if x in text})
-
-    pos = len(pos_hits)
-    neg = len(neg_hits)
-
-    if pos > neg:
-        sentiment = "positive"
-    elif neg > pos:
-        sentiment = "negative"
-    else:
-        sentiment = "neutral"
-
-    difference = abs(pos - neg)
-    if difference >= 2:
-        confidence = "high"
-    elif difference == 1:
-        confidence = "medium"
-    else:
-        confidence = "low"
-
-    if sentiment == "positive":
-        reason = "تم التصنيف كإيجابي بسبب مؤشرات مثل: " + ", ".join(pos_hits[:4])
-    elif sentiment == "negative":
-        reason = "تم التصنيف كسلبي بسبب مؤشرات مثل: " + ", ".join(neg_hits[:4])
-    else:
-        if context_hits:
-            reason = "العنوان يحمل سياقًا أو مخاوف عامة دون إشارة مالية واضحة."
-        else:
-            reason = "لم تظهر مؤشرات إيجابية أو سلبية كافية في العنوان والملخص."
-
-    # لا نرفع الثقة بسبب كلمة سياقية عامة مثل fearing وحدها.
-    if sentiment == "neutral" and context_hits:
-        confidence = "low"
-
-    return {
-        "sentiment": sentiment,
-        "sentiment_ar": SENTIMENT_AR[sentiment],
-        "confidence": confidence,
-        "confidence_ar": CONFIDENCE_AR[confidence],
-        "reason_ar": reason,
-        "positive_hits": pos_hits,
-        "negative_hits": neg_hits,
-    }
-
-
-def _db():
-    con = sqlite3.connect(DB_PATH)
-    con.execute("""CREATE TABLE IF NOT EXISTS news(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        source TEXT,
-        url TEXT UNIQUE,
-        published TEXT,
-        fetched_at REAL,
-        summary TEXT,
-        assets TEXT,
-        sentiment TEXT,
-        impact TEXT
-    )""")
-    # Backward compatibility with older ROBI news tables.
-    cols = {r[1] for r in con.execute("PRAGMA table_info(news)")}
-    for name, typ in [("summary", "TEXT"), ("assets", "TEXT"), ("sentiment", "TEXT"), ("impact", "TEXT")]:
-        if name not in cols:
-            con.execute(f"ALTER TABLE news ADD COLUMN {name} {typ}")
-    con.commit()
-    return con
-
 
 def init_db():
-    con = _db()
-    con.close()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS news (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            url TEXT UNIQUE,
+            published TEXT,
+            source TEXT,
+            description TEXT,
+            query TEXT,
+            sentiment TEXT,
+            confidence REAL,
+            sentiment_ar TEXT,
+            confidence_ar TEXT,
+            reason_ar TEXT,
+            created_at TEXT
+        )
+    """)
+    # دعم قواعد البيانات القديمة بدون حذف البيانات.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(news)").fetchall()}
+    additions = {
+        "confidence": "REAL",
+        "sentiment_ar": "TEXT",
+        "confidence_ar": "TEXT",
+        "reason_ar": "TEXT",
+        "created_at": "TEXT",
+        "query": "TEXT",
+    }
+    for col, typ in additions.items():
+        if col not in existing:
+            conn.execute(f"ALTER TABLE news ADD COLUMN {col} {typ}")
+    conn.commit()
+    conn.close()
 
+def _clean(value):
+    if value is None:
+        return ""
+    return html.unescape(re.sub(r"<[^>]+>", " ", str(value))).strip()
 
-def _asset_matches(text):
-    low = text.lower()
-    found = []
-    for asset, terms in ASSET_TERMS.items():
-        if any(re.search(r"(?<![a-z])" + re.escape(term) + r"(?![a-z])", low) for term in terms):
-            found.append(asset)
-    return found
+def _classify(title, description=""):
+    text = f"{title} {description}".lower()
+    pos = 0
+    neg = 0
+    pos_hits = []
+    neg_hits = []
 
+    for term, weight in POSITIVE_TERMS.items():
+        if term in text:
+            pos += weight
+            pos_hits.append(term)
 
-def _classify(title, summary=""):
-    text = f"{title} {summary}".lower()
-    pos = sum(1 for x in POSITIVE if x in text)
-    neg = sum(1 for x in NEGATIVE if x in text)
-    if pos > neg:
-        sentiment = "positive"
-    elif neg > pos:
-        sentiment = "negative"
-    else:
-        sentiment = "neutral"
-    strength = "high" if abs(pos - neg) >= 2 else ("medium" if abs(pos - neg) == 1 else "low")
-    return sentiment, strength
+    for term, weight in NEGATIVE_TERMS.items():
+        if term in text:
+            neg += weight
+            neg_hits.append(term)
 
+    # إذا لم توجد أدلة كافية، الخبر محايد.
+    if pos == 0 and neg == 0:
+        return "neutral", 0.55, "⚪ محايد", "متوسطة", "لم تظهر في العنوان أو الوصف إشارة واضحة تميل إلى الإيجابية أو السلبية."
 
-def _parse_rss(xml_bytes):
-    root = ET.fromstring(xml_bytes)
+    diff = pos - neg
+    total = pos + neg
+
+    if diff > 0:
+        confidence = min(0.95, 0.60 + min(diff, 5) * 0.07)
+        reason = "ظهرت مؤشرات إيجابية مرتبطة بالخبر"
+        if pos_hits:
+            reason += " مثل: " + "، ".join(pos_hits[:3])
+        if neg_hits:
+            reason += " مع وجود إشارات سلبية أيضًا" 
+        return "positive", confidence, "🟢 إيجابي", _confidence_ar(confidence), reason + "."
+    if diff < 0:
+        confidence = min(0.95, 0.60 + min(abs(diff), 5) * 0.07)
+        reason = "ظهرت مؤشرات سلبية مرتبطة بالخبر"
+        if neg_hits:
+            reason += " مثل: " + "، ".join(neg_hits[:3])
+        if pos_hits:
+            reason += " مع وجود إشارات إيجابية أيضًا"
+        return "negative", confidence, "🔴 سلبي", _confidence_ar(confidence), reason + "."
+
+    return "neutral", 0.60, "⚪ محايد", "متوسطة", "الإشارات الإيجابية والسلبية متقاربة، لذلك لم يُعطَ الخبر اتجاهًا واضحًا."
+
+def _confidence_ar(value):
+    value = float(value or 0)
+    if value >= 0.80:
+        return "مرتفعة"
+    if value >= 0.65:
+        return "متوسطة"
+    return "منخفضة"
+
+def _parse_rss(xml_text, query):
+    root = ET.fromstring(xml_text)
     rows = []
     for item in root.findall(".//item"):
-        def txt(tag):
-            node = item.find(tag)
-            return (node.text or "").strip() if node is not None else ""
-        title = txt("title")
-        link = txt("link")
-        desc = re.sub(r"<[^>]+>", " ", txt("description"))
-        pub = txt("pubDate") or txt("published")
-        source = txt("source") or "Google News RSS"
-        if title and link:
-            rows.append({"title": title, "url": link, "summary": desc, "published": pub, "source": source})
+        title = _clean(item.findtext("title"))
+        link = _clean(item.findtext("link"))
+        pub = _clean(item.findtext("pubDate"))
+        desc = _clean(item.findtext("description"))
+        source_el = item.find("source")
+        source = _clean(source_el.text if source_el is not None else "")
+        if not title or not link:
+            continue
+        sentiment, confidence, sentiment_ar, confidence_ar, reason_ar = _classify(title, desc)
+        rows.append({
+            "title": title,
+            "url": link,
+            "published": pub,
+            "source": source or "Google News",
+            "description": desc,
+            "query": query,
+            "sentiment": sentiment,
+            "confidence": confidence,
+            "sentiment_ar": sentiment_ar,
+            "confidence_ar": confidence_ar,
+            "reason_ar": reason_ar,
+        })
     return rows
 
-
-def _feed_url(query):
-    q = urllib.parse.quote(query)
-    return f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
-
-
-def _queries(symbol=None):
-    if symbol:
-        s = symbol.upper().replace("/", "")
-        assets = [s]
-        for asset, terms in ASSET_TERMS.items():
-            if s.startswith(asset):
-                assets = terms[:2]
-                break
-        return [" OR ".join(f'"{x}"' for x in assets)]
-    return [
-        "stock market OR S&P 500 OR Nasdaq",
-        "bitcoin OR ethereum OR crypto market",
-        "Federal Reserve OR interest rates markets",
-    ]
-
-
-def fetch_news(limit=20, symbol=None):
+def _save(rows):
+    if not rows:
+        return 0
     init_db()
-    collected = []
-    for query in _queries(symbol):
-        try:
-            r = requests.get(_feed_url(query), timeout=NEWS_TIMEOUT, headers={"User-Agent": "ROBI-NewsEngine/1.0"})
-            r.raise_for_status()
-            collected.extend(_parse_rss(r.content))
-        except Exception as exc:
-            print("News feed warning:", query, exc)
-
-    seen = set()
-    con = _db()
-    now = time.time()
-    for item in collected:
-        url = item["url"]
-        if url in seen:
-            continue
-        seen.add(url)
-        assets = _asset_matches(item["title"] + " " + item.get("summary", ""))
-        classification = _classify(item["title"], item.get("summary", ""))
-        sentiment = classification["sentiment"]
-        impact = classification["confidence"]
-        con.execute("""INSERT INTO news(title,source,url,published,fetched_at,summary,assets,sentiment,impact)
-            VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(url) DO UPDATE SET
-            title=excluded.title, source=excluded.source, published=excluded.published,
-            summary=excluded.summary, assets=excluded.assets, sentiment=excluded.sentiment, impact=excluded.impact""",
-            (item["title"], item["source"], url, item.get("published", ""), now,
-             item.get("summary", ""), ",".join(assets), sentiment, impact))
-    con.commit()
-    con.close()
-    return latest_news(limit, symbol=symbol)
-
-
-def latest_news(limit=10, symbol=None):
-    init_db()
-    con = _db()
-    cutoff = time.time() - NEWS_MAX_AGE_HOURS * 3600
-    if symbol:
-        assets = [symbol.upper().replace("/", "")]
-        for asset in ASSET_TERMS:
-            if assets[0].startswith(asset):
-                assets.append(asset)
-        clauses = " OR ".join("(',' || assets || ',') LIKE ?" for _ in assets)
-        params = [cutoff] + [f"%,{a},%" for a in assets]
-        rows = con.execute(f"SELECT title,source,url,published,summary,assets,sentiment,impact FROM news WHERE fetched_at>=? AND ({clauses}) ORDER BY fetched_at DESC LIMIT ?", params + [limit]).fetchall()
-    else:
-        rows = con.execute("SELECT title,source,url,published,summary,assets,sentiment,impact FROM news WHERE fetched_at>=? ORDER BY fetched_at DESC LIMIT ?", (cutoff, limit)).fetchall()
-    con.close()
-    keys = ["title","source","url","published","summary","assets","sentiment","impact"]
-    out = []
+    conn = sqlite3.connect(DB_PATH)
+    now = datetime.now(timezone.utc).isoformat()
+    saved = 0
     for row in rows:
-        item = dict(zip(keys, row))
-        classification = _classify(item.get("title", ""), item.get("summary", ""))
-        item["sentiment_ar"] = classification["sentiment_ar"]
-        item["confidence_ar"] = classification["confidence_ar"]
-        item["reason_ar"] = classification["reason_ar"]
-        item["confidence"] = classification["confidence"]
-        out.append(item)
-    return out
+        try:
+            conn.execute("""
+                INSERT INTO news
+                (title,url,published,source,description,query,sentiment,confidence,
+                 sentiment_ar,confidence_ar,reason_ar,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(url) DO UPDATE SET
+                  title=excluded.title,
+                  published=excluded.published,
+                  source=excluded.source,
+                  description=excluded.description,
+                  query=excluded.query,
+                  sentiment=excluded.sentiment,
+                  confidence=excluded.confidence,
+                  sentiment_ar=excluded.sentiment_ar,
+                  confidence_ar=excluded.confidence_ar,
+                  reason_ar=excluded.reason_ar
+            """, (
+                row["title"], row["url"], row["published"], row["source"],
+                row["description"], row["query"], row["sentiment"],
+                row["confidence"], row["sentiment_ar"],
+                row["confidence_ar"], row["reason_ar"], now
+            ))
+            saved += 1
+        except sqlite3.Error:
+            continue
+    conn.commit()
+    conn.close()
+    return saved
 
+def fetch_news(limit=20, query="NVIDIA OR NVDA"):
+    """جلب أخبار حديثة من Google News RSS وتخزينها."""
+    init_db()
+    try:
+        url = RSS_URL.format(query=quote_plus(query))
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "ROBI-News-Engine/3.0"}
+        )
+        response.raise_for_status()
+        rows = _parse_rss(response.text, query)
+        _save(rows[:limit])
+        return rows[:limit]
+    except Exception:
+        return []
 
-def analyze_news(news):
-    news = news or []
-    positive = sum(1 for x in news if x.get("sentiment") == "positive")
-    negative = sum(1 for x in news if x.get("sentiment") == "negative")
-    neutral = sum(1 for x in news if x.get("sentiment") == "neutral")
-    if positive > negative:
-        direction = "positive"
-    elif negative > positive:
-        direction = "negative"
+def latest_news(limit=10, query=None):
+    """قراءة الأخبار المخزنة. لا تعتمد على إعادة الجلب."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if query:
+        rows = conn.execute("""
+            SELECT * FROM news
+            WHERE lower(query) LIKE ?
+               OR lower(title) LIKE ?
+            ORDER BY id DESC LIMIT ?
+        """, (f"%{query.lower()}%", f"%{query.lower()}%", int(limit))).fetchall()
     else:
-        direction = "mixed" if news else "none"
-    direction_ar = {"positive": "إيجابي", "negative": "سلبي", "mixed": "مختلط", "none": "لا توجد أخبار"}[direction]
-    return {
-        "count": len(news),
-        "positive": positive,
-        "negative": negative,
-        "neutral": neutral,
-        "direction": direction,
-        "direction_ar": direction_ar,
-        "summary": "لا توجد أخبار مرتبطة." if not news else f"الأخبار المرتبطة: {positive} إيجابية، {negative} سلبية، {neutral} محايدة.",
-    }
+        rows = conn.execute(
+            "SELECT * FROM news ORDER BY id DESC LIMIT ?", (int(limit),)
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def search_news(query, limit=10):
+    """جلب أخبار تخص أصلًا محددًا، ثم إرجاع المخزن منها."""
+    rows = fetch_news(limit=limit, query=query)
+    if rows:
+        return rows
+    return latest_news(limit=limit, query=query)
+
+init_db()
