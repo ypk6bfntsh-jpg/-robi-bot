@@ -80,7 +80,7 @@ try:
     )
     from robi_engine.explainability import build_explainability
     from robi_engine.confluence import build_confluence
-    from robi_engine.news_engine import fetch_news, latest_news, init_db
+    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news
     try:
         from robi_engine.live_data import (
             get_klines,
@@ -297,6 +297,7 @@ def snapshot_text(snapshot, symbol, timeframe):
         "",
         "📰 الأخبار المرتبطة:",
         f"• {len(snapshot.get('news', []))} خبر/أخبار مخزنة",
+        f"• اتجاه الأخبار: {(snapshot.get('news_analysis') or {}).get('direction', 'none')}",
         "",
         "🧠 تفسير الحالة:",
     ]
@@ -494,7 +495,12 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
         )
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
+    try:
+        fetch_news(20, symbol=symbol.upper())
+    except Exception as exc:
+        print("News fetch warning:", exc)
     snapshot["news"] = news_for_symbol(symbol, 10)
+    snapshot["news_analysis"] = analyze_news(snapshot["news"])
     snapshot["explainability"] = build_explainability(snapshot)
     snapshot["confluence"] = build_confluence(snapshot)
     ensure_db()
