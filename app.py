@@ -421,9 +421,14 @@ def snapshot_text(snapshot, symbol, timeframe):
             f"• SELL share: {safe_float(flow_sum.get('sell_share')) * 100:.1f}%"
         ) if flow_sum else "• لا توجد بيانات تدفق",
         "",
-        "📰 الأخبار المرتبطة:",
-        f"• {len(snapshot.get('news', []))} خبر/أخبار مخزنة",
-        f"• اتجاه الأخبار: {(snapshot.get('news_analysis') or {}).get('direction', 'none')}",
+        "📰 ملخص الأخبار:",
+        f"• عدد الأخبار: {len(snapshot.get('news', []))}",
+        f"• 🟢 الإيجابي: {(snapshot.get('news_analysis') or {}).get('positive', 0)}",
+        f"• 🔴 السلبي: {(snapshot.get('news_analysis') or {}).get('negative', 0)}",
+        f"• ⚪ المحايد: {(snapshot.get('news_analysis') or {}).get('neutral', 0)}",
+        f"• 📊 درجة الثقة: {((snapshot.get('news_analysis') or {}).get('confidence', 0) * 100):.0f}%",
+        f"• 🧭 اتجاه الأخبار: {(snapshot.get('news_analysis') or {}).get('direction_ar', 'لا توجد أخبار')}",
+        f"• 🎯 الأثر المحتمل: {(snapshot.get('news_analysis') or {}).get('impact_ar', 'غير واضح')}",
         "",
         "🧠 تفسير الحالة:",
     ]
@@ -568,6 +573,12 @@ def news_for_symbol(symbol: str, limit=10):
         rows = []
 
     assets = symbol_assets(symbol)
+
+    if not rows:
+        try:
+            rows = fetch_news(limit=limit, query=symbol.upper(), symbol=symbol.upper())
+        except Exception:
+            rows = []
     out = []
 
     for item in rows:
@@ -635,7 +646,7 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
     try:
-        fetch_news(20, symbol=symbol.upper())
+        fetch_news(20, query=symbol.upper(), symbol=symbol.upper())
     except Exception as exc:
         print("News fetch warning:", exc)
     snapshot["news"] = news_for_symbol(symbol, 10)
