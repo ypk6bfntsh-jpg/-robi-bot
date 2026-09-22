@@ -447,11 +447,15 @@ def symbol_assets(symbol: str):
 
 
 def news_for_symbol(symbol: str, limit=10):
+    # Current analysis must use fresh news only. Older records remain in the
+    # database for history/learning but must not influence the current view.
     try:
-        if fresh_news is not None:
-            rows = fresh_news(latest_news(limit=50), max_age_hours=24, limit=50)
-        else:
-            rows = latest_news(limit=50, max_age_hours=24)
+        rows = latest_news(limit=50, max_age_hours=24)
+    except TypeError:
+        try:
+            rows = latest_news(limit=50)
+        except Exception:
+            rows = []
     except Exception:
         rows = []
 
@@ -460,15 +464,16 @@ def news_for_symbol(symbol: str, limit=10):
 
     for item in rows:
         title = (item.get("title") or "").lower()
+        description = (item.get("description") or "").lower()
         matched = any(
-            keyword in title
+            keyword in title or keyword in description
             for asset in assets
             for keyword in ASSET_KEYWORDS.get(asset, [])
         )
-        # General crypto/market news is also retained as context.
         if matched or not assets:
             copy = dict(item)
             copy["affected_assets"] = assets
+            copy["fresh_window_hours"] = 24
             out.append(copy)
         if len(out) >= limit:
             break
@@ -479,15 +484,16 @@ def news_for_symbol(symbol: str, limit=10):
 def news_text(symbol=None, limit=10):
     if symbol:
         rows = news_for_symbol(symbol, limit)
-        title = f"📰 ROBI NEWS — {symbol.upper()}"
+        title = f"📰 ROBI NEWS — {symbol.upper()} — آخر 24 ساعة"
     else:
-        rows = (fresh_news(latest_news(limit=limit), max_age_hours=24, limit=limit)
-                if fresh_news is not None
-                else latest_news(limit, max_age_hours=24))
-        title = "📰 ROBI NEWS — Global Market Feed"
+        try:
+            rows = latest_news(limit, max_age_hours=24)
+        except TypeError:
+            rows = latest_news(limit)
+        title = "📰 ROBI NEWS — Global Market Feed — آخر 24 ساعة"
 
     if not rows:
-        return title + "\n\nلا توجد أخبار مخزنة حاليًا."
+        return title + "\n\nلا توجد أخبار حديثة خلال آخر 24 ساعة."
 
     lines = [title, ""]
     for i, item in enumerate(rows, 1):
@@ -989,14 +995,23 @@ def handle_message(message: dict):
 
         elif command == "/news":
             parts = text.split()
-            symbol = parts[1] if len(parts) > 1 else None
+            symbol = parts[1].upper() if len(parts) > 1 else None
 
             try:
-                fetch_news(20)
+                if symbol:
+                    fetch_news(20, query=symbol, symbol=symbol)
+                else:
+                    fetch_news(20)
+            except TypeError:
+                try:
+                    fetch_news(20)
+                except Exception as exc:
+                    print("News fetch warning:", exc)
             except Exception as exc:
                 print("News fetch warning:", exc)
 
             send_message(chat_id, news_text(symbol, 10))
+
 
         elif command == "/flow":
             parts = text.split()
@@ -1143,13 +1158,32 @@ def analyze_http(symbol: str = "BTCUSDT", timeframe: str = "15m"):
 
 @app.get("/news")
 def news_http(symbol: str | None = None, limit: int = 10):
+    limit = max(1, min(limit, 50))
     try:
-        fetch_news(max(1, min(limit, 50)))
+        if symbol:
+            fetch_news(limit, query=symbol.upper(), symbol=symbol.upper())
+        else:
+            fetch_news(limit)
+    except TypeError:
+        try:
+            fetch_news(limit)
+        except Exception:
+            pass
     except Exception:
         pass
+
     if symbol:
-        return {"symbol": symbol.upper(), "news": news_for_symbol(symbol, limit)}
-    return {"news": latest_news(limit)}
+        return {
+            "symbol": symbol.upper(),
+            "fresh_window_hours": 24,
+            "news": news_for_symbol(symbol, limit),
+        }
+
+    try:
+        rows = latest_news(limit, max_age_hours=24)
+    except TypeError:
+        rows = latest_news(limit)
+    return {"fresh_window_hours": 24, "news": rows}
 
 
 @app.post("/telegram/webhook")
