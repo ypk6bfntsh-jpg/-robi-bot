@@ -80,7 +80,7 @@ try:
     )
     from robi_engine.explainability import build_explainability
     from robi_engine.confluence import build_confluence
-    from robi_engine.news_engine import fetch_news, latest_news, init_db
+    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news
     try:
         from robi_engine.news_engine import fresh_news
     except Exception:
@@ -126,6 +126,9 @@ except Exception as exc:
 
     def latest_news(limit=10):
         return []
+
+    def analyze_news(rows):
+        return {"direction":"none","direction_ar":"لا توجد أخبار","positive":0,"negative":0,"neutral":0,"confidence":0.0,"impact_ar":"غير واضح"}
 
     def market_provider_status():
         return {
@@ -299,11 +302,22 @@ def snapshot_text(snapshot, symbol, timeframe):
             f"• SELL share: {safe_float(flow_sum.get('sell_share')) * 100:.1f}%"
         ) if flow_sum else "• لا توجد بيانات تدفق",
         "",
-        "📰 الأخبار المرتبطة:",
-        f"• {len(snapshot.get('news', []))} خبر/أخبار مخزنة",
+        "📰 الأخبار المرتبطة — آخر 24 ساعة:",
+    ]
+
+    news_analysis = snapshot.get("news_analysis") or {}
+    news_rows = snapshot.get("news") or []
+    lines.extend([
+        f"• عدد الأخبار: {len(news_rows)}",
+        f"• 🟢 الإيجابي: {news_analysis.get('positive', 0)}",
+        f"• 🔴 السلبي: {news_analysis.get('negative', 0)}",
+        f"• ⚪ المحايد: {news_analysis.get('neutral', 0)}",
+        f"• 📊 درجة الثقة: {safe_float(news_analysis.get('confidence')) * 100:.0f}%",
+        f"• 🧭 اتجاه الأخبار: {news_analysis.get('direction_ar', 'محايد')}",
+        f"• 🎯 الأثر المحتمل: {news_analysis.get('impact_ar', 'غير واضح')}",
         "",
         "🧠 تفسير الحالة:",
-    ]
+    ])
 
     explanation = snapshot.get("explainability") or {}
     for item in (explanation.get("bullish") or [])[:6]:
@@ -570,6 +584,7 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
     snapshot["news"] = news_for_symbol(symbol, 10)
+    snapshot["news_analysis"] = analyze_news(snapshot["news"])
     snapshot["explainability"] = build_explainability(snapshot)
     snapshot["confluence"] = build_confluence(snapshot)
     snapshot["state_change_condition"] = state_change_condition(snapshot)
