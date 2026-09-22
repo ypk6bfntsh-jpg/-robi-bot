@@ -583,6 +583,42 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
         )
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
+
+    # Volume repair layer: if the engine returns an empty/zero volume for the
+    # current candle, derive it from the actual OHLCV candles already fetched.
+    # This avoids treating a transient zero as real market evidence.
+    try:
+        volume = snapshot.get("volume") or {}
+        current_volume = safe_float(volume.get("current"))
+        relative_volume = safe_float(volume.get("relative"))
+        candles = snapshot.get("candles") or []
+
+        def _candle_volume(c):
+            if isinstance(c, dict):
+                for key in ("volume", "Volume", "v"):
+                    if key in c:
+                        return safe_float(c.get(key))
+            else:
+                for attr in ("volume", "Volume", "v"):
+                    if hasattr(c, attr):
+                        return safe_float(getattr(c, attr))
+            return 0.0
+
+        candle_volumes = [_candle_volume(c) for c in candles]
+        valid_volumes = [v for v in candle_volumes if v > 0]
+        if (current_volume <= 0 or relative_volume <= 0) and len(valid_volumes) >= 2:
+            current = valid_volumes[-1]
+            history = valid_volumes[:-1][-20:]
+            baseline = sum(history) / len(history) if history else 0.0
+            if current > 0 and baseline > 0:
+                volume["current"] = current
+                volume["relative"] = current / baseline
+                volume["spike"] = bool(volume["relative"] >= 2.0)
+                volume["source"] = "candles_fallback"
+                snapshot["volume"] = volume
+    except Exception as volume_exc:
+        print("Volume repair warning:", volume_exc)
+
     snapshot["news"] = news_for_symbol(symbol, 10)
     snapshot["news_analysis"] = analyze_news(snapshot["news"])
     snapshot["explainability"] = build_explainability(snapshot)
