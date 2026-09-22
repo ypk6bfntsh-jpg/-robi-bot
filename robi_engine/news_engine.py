@@ -65,6 +65,7 @@ def init_db():
         "sentiment_ar": "TEXT",
         "confidence_ar": "TEXT",
         "reason_ar": "TEXT",
+        "impact_ar": "TEXT",
         "created_at": "TEXT",
         "query": "TEXT",
     }
@@ -80,47 +81,109 @@ def _clean(value):
     return html.unescape(re.sub(r"<[^>]+>", " ", str(value))).strip()
 
 def _classify(title, description=""):
-    text = f"{title} {description}".lower()
-    pos = 0
-    neg = 0
+    """
+    تصنيف سياقي مبسط:
+    - لا يعتمد على كلمة واحدة فقط.
+    - يجمع الإشارات الإيجابية والسلبية.
+    - يعطي درجة ثقة.
+    - يحدد الأثر المحتمل على الأصل.
+    """
+    title_text = _clean(title)
+    desc_text = _clean(description)
+    text_all = f"{title_text} {desc_text}".lower()
+    title_low = title_text.lower()
+
+    pos_score = 0
+    neg_score = 0
     pos_hits = []
     neg_hits = []
 
     for term, weight in POSITIVE_TERMS.items():
-        if term in text:
-            pos += weight
+        if term in text_all:
+            # العنوان أهم من الوصف، لذلك نعطيه وزنًا أعلى قليلًا.
+            w = weight + (1 if term in title_low else 0)
+            pos_score += w
             pos_hits.append(term)
 
     for term, weight in NEGATIVE_TERMS.items():
-        if term in text:
-            neg += weight
+        if term in text_all:
+            w = weight + (1 if term in title_low else 0)
+            neg_score += w
             neg_hits.append(term)
 
-    # إذا لم توجد أدلة كافية، الخبر محايد.
-    if pos == 0 and neg == 0:
-        return "neutral", 0.55, "⚪ محايد", "متوسطة", "لم تظهر في العنوان أو الوصف إشارة واضحة تميل إلى الإيجابية أو السلبية."
+    # عبارات تتطلب سياقًا ولا تُعتبر سلبية/إيجابية بمفردها.
+    context_positive = [
+        "bottleneck", "demand", "adoption", "next generation",
+        "ai infrastructure", "physical ai", "data center",
+    ]
+    context_negative = [
+        "fears", "fearing", "concerns", "concerned", "risk",
+    ]
 
-    diff = pos - neg
-    total = pos + neg
+    # "bottleneck" مثلًا لا يعني تلقائيًا أن السهم سلبي.
+    # إذا ظهر مع طلب/بنية تحتية/تبنٍ، نتركه محايدًا ما لم توجد إشارات أخرى.
+    for term in context_positive:
+        if term in text_all and term in title_low:
+            if "demand" in text_all or "adoption" in text_all or "infrastructure" in text_all:
+                pos_score += 1
+                pos_hits.append("سياق داعم للنمو")
+
+    for term in context_negative:
+        if term in text_all:
+            # لا نضيف سلبية إلا إذا ارتبطت بخسارة/هبوط/تحذير فعلي.
+            if any(x in text_all for x in [
+                "loss", "losses", "cut", "lower", "downgrade",
+                "miss", "decline", "falls", "drop"
+            ]):
+                neg_score += 1
+                neg_hits.append("مخاوف مرتبطة بمؤشر سلبي")
+
+    if pos_score == 0 and neg_score == 0:
+        return (
+            "neutral", 0.55, "⚪ محايد", "متوسطة",
+            "غير واضح",
+            "لم تظهر إشارة كافية على اتجاه الخبر، لذلك تم تصنيفه محايدًا."
+        )
+
+    diff = pos_score - neg_score
+    total = pos_score + neg_score
 
     if diff > 0:
-        confidence = min(0.95, 0.60 + min(diff, 5) * 0.07)
-        reason = "ظهرت مؤشرات إيجابية مرتبطة بالخبر"
+        confidence = min(0.96, 0.62 + min(diff, 7) * 0.05)
+        if pos_score >= 5 and diff >= 3:
+            confidence = min(0.96, confidence + 0.04)
+        reason = "توجد إشارات داعمة في الخبر"
         if pos_hits:
             reason += " مثل: " + "، ".join(pos_hits[:3])
         if neg_hits:
-            reason += " مع وجود إشارات سلبية أيضًا" 
-        return "positive", confidence, "🟢 إيجابي", _confidence_ar(confidence), reason + "."
+            reason += " مع وجود بعض الإشارات المقابلة"
+        impact = "داعم للسهم"
+        return (
+            "positive", confidence, "🟢 إيجابي",
+            _confidence_ar(confidence), impact, reason + "."
+        )
+
     if diff < 0:
-        confidence = min(0.95, 0.60 + min(abs(diff), 5) * 0.07)
-        reason = "ظهرت مؤشرات سلبية مرتبطة بالخبر"
+        confidence = min(0.96, 0.62 + min(abs(diff), 7) * 0.05)
+        if neg_score >= 5 and abs(diff) >= 3:
+            confidence = min(0.96, confidence + 0.04)
+        reason = "توجد إشارات سلبية في الخبر"
         if neg_hits:
             reason += " مثل: " + "، ".join(neg_hits[:3])
         if pos_hits:
-            reason += " مع وجود إشارات إيجابية أيضًا"
-        return "negative", confidence, "🔴 سلبي", _confidence_ar(confidence), reason + "."
+            reason += " مع وجود بعض الإشارات المقابلة"
+        impact = "ضاغط على السهم"
+        return (
+            "negative", confidence, "🔴 سلبي",
+            _confidence_ar(confidence), impact, reason + "."
+        )
 
-    return "neutral", 0.60, "⚪ محايد", "متوسطة", "الإشارات الإيجابية والسلبية متقاربة، لذلك لم يُعطَ الخبر اتجاهًا واضحًا."
+    return (
+        "neutral", 0.60, "⚪ محايد", "متوسطة",
+        "غير واضح",
+        "الإشارات الإيجابية والسلبية متقاربة، لذلك لا يوجد اتجاه واضح."
+    )
+
 
 def _confidence_ar(value):
     value = float(value or 0)
@@ -142,7 +205,7 @@ def _parse_rss(xml_text, query):
         source = _clean(source_el.text if source_el is not None else "")
         if not title or not link:
             continue
-        sentiment, confidence, sentiment_ar, confidence_ar, reason_ar = _classify(title, desc)
+        sentiment, confidence, sentiment_ar, confidence_ar, impact_ar, reason_ar = _classify(title, desc)
         rows.append({
             "title": title,
             "url": link,
@@ -170,7 +233,7 @@ def _save(rows):
             conn.execute("""
                 INSERT INTO news
                 (title,url,published,source,description,query,sentiment,confidence,
-                 sentiment_ar,confidence_ar,reason_ar,created_at)
+                 sentiment_ar,confidence_ar,reason_ar,impact_ar,created_at)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(url) DO UPDATE SET
                   title=excluded.title,
@@ -182,12 +245,13 @@ def _save(rows):
                   confidence=excluded.confidence,
                   sentiment_ar=excluded.sentiment_ar,
                   confidence_ar=excluded.confidence_ar,
-                  reason_ar=excluded.reason_ar
+                  reason_ar=excluded.reason_ar,
+                  impact_ar=excluded.impact_ar
             """, (
                 row["title"], row["url"], row["published"], row["source"],
                 row["description"], row["query"], row["sentiment"],
                 row["confidence"], row["sentiment_ar"],
-                row["confidence_ar"], row["reason_ar"], now
+                row["confidence_ar"], row["reason_ar"], row.get("impact_ar", "غير واضح"), now
             ))
             saved += 1
         except sqlite3.Error:
@@ -272,6 +336,44 @@ def analyze_news(rows):
     return {
         "direction": direction,
         "direction_ar": direction_ar,
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "confidence": confidence,
+    }
+
+
+def build_news_impact(rows):
+    """يبني ملخصًا عربيًا للأخبار لاستخدامه في التحليل والتوافق."""
+    rows = rows or []
+    positive = sum(1 for r in rows if r.get("sentiment") == "positive")
+    negative = sum(1 for r in rows if r.get("sentiment") == "negative")
+    neutral = sum(1 for r in rows if r.get("sentiment") == "neutral")
+
+    if positive > negative:
+        direction = "positive"
+        direction_ar = "إيجابي"
+        impact_ar = "داعم للسهم"
+    elif negative > positive:
+        direction = "negative"
+        direction_ar = "سلبي"
+        impact_ar = "ضاغط على السهم"
+    elif positive == negative and positive > 0:
+        direction = "mixed"
+        direction_ar = "مختلط"
+        impact_ar = "متضارب"
+    else:
+        direction = "none"
+        direction_ar = "محايد"
+        impact_ar = "غير واضح"
+
+    confidences = [float(r.get("confidence") or 0) for r in rows]
+    confidence = round(sum(confidences) / len(confidences), 2) if confidences else 0.0
+
+    return {
+        "direction": direction,
+        "direction_ar": direction_ar,
+        "impact_ar": impact_ar,
         "positive": positive,
         "negative": negative,
         "neutral": neutral,
