@@ -80,7 +80,11 @@ try:
     )
     from robi_engine.explainability import build_explainability
     from robi_engine.confluence import build_confluence
-    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news
+    from robi_engine.news_engine import fetch_news, latest_news, init_db
+    try:
+        from robi_engine.news_engine import fresh_news
+    except Exception:
+        fresh_news = None
     try:
         from robi_engine.live_data import (
             get_klines,
@@ -241,132 +245,6 @@ def latest_candle(snapshot):
     return candles[-1] if candles else {}
 
 
-
-def ar_trend(value):
-    return {
-        "up": "صاعد",
-        "down": "هابط",
-        "sideways": "جانبي",
-        "unknown": "غير معروف",
-    }.get(str(value).lower(), str(value))
-
-def ar_state(value):
-    return {
-        "WAIT": "انتظار",
-        "BUY": "شراء",
-        "SELL": "بيع",
-        "HOLD": "احتفاظ",
-    }.get(str(value).upper(), str(value))
-
-def ar_news_direction(value):
-    return {
-        "positive": "إيجابي",
-        "negative": "سلبي",
-        "mixed": "مختلط",
-        "none": "لا توجد أخبار",
-    }.get(str(value).lower(), str(value))
-
-def summarize_news_for_analysis(rows):
-    """تلخيص الأخبار بشكل متوافق مع السجلات القديمة والجديدة."""
-    rows = rows or []
-    positive = negative = neutral = 0
-    confidence_values = []
-
-    positive_words = (
-        "rises", "rising", "growth", "beats", "beat estimates",
-        "upgrade", "upgraded", "gains", "gain", "dividend",
-        "buyback", "strong earnings", "record revenue",
-        "raises outlook", "raised outlook", "partnership", "demand"
-    )
-    negative_words = (
-        "falls", "falling", "drops", "drop", "decline", "declines",
-        "downgrade", "downgraded", "misses", "missed estimates",
-        "lawsuit", "investigation", "probe", "recall", "warning"
-    )
-
-    for item in rows:
-        sentiment = str(item.get("sentiment") or "").strip().lower()
-        sentiment_ar = str(item.get("sentiment_ar") or "").strip()
-        title = str(item.get("title") or "").lower()
-
-        if sentiment not in {"positive", "negative", "neutral"}:
-            if "إيجابي" in sentiment_ar:
-                sentiment = "positive"
-            elif "سلبي" in sentiment_ar:
-                sentiment = "negative"
-            elif "محايد" in sentiment_ar:
-                sentiment = "neutral"
-            elif any(word in title for word in positive_words):
-                sentiment = "positive"
-            elif any(word in title for word in negative_words):
-                sentiment = "negative"
-            else:
-                sentiment = "neutral"
-
-        if sentiment == "positive":
-            positive += 1
-        elif sentiment == "negative":
-            negative += 1
-        else:
-            neutral += 1
-
-        try:
-            value = float(item.get("confidence") or 0)
-            if value > 0:
-                confidence_values.append(value)
-        except (TypeError, ValueError):
-            pass
-
-    total = positive + negative + neutral
-
-    if positive > negative:
-        direction = "positive"
-        direction_ar = "إيجابي"
-        impact_ar = "داعم للسهم"
-    elif negative > positive:
-        direction = "negative"
-        direction_ar = "سلبي"
-        impact_ar = "ضاغط على السهم"
-    elif positive == negative and positive > 0:
-        direction = "mixed"
-        direction_ar = "مختلط"
-        impact_ar = "متضارب"
-    elif total:
-        direction = "none"
-        direction_ar = "محايد"
-        impact_ar = "غير واضح"
-    else:
-        direction = "none"
-        direction_ar = "لا توجد أخبار"
-        impact_ar = "غير واضح"
-
-    confidence = (
-        round(sum(confidence_values) / len(confidence_values), 2)
-        if confidence_values else
-        (round(max(positive, negative) / total, 2) if total else 0.0)
-    )
-
-    return {
-        "direction": direction,
-        "direction_ar": direction_ar,
-        "impact_ar": impact_ar,
-        "positive": positive,
-        "negative": negative,
-        "neutral": neutral,
-        "confidence": confidence,
-    }
-
-def ar_confluence_state(value):
-    return {
-        "up": "صاعد",
-        "down": "هابط",
-        "WAIT": "انتظار",
-        "BUY": "شراء",
-        "SELL": "بيع",
-        "HOLD": "احتفاظ",
-    }.get(str(value), str(value))
-
-
 def snapshot_text(snapshot, symbol, timeframe):
     ticker = snapshot.get("ticker") or {}
     price = safe_float(ticker.get("lastPrice"))
@@ -383,13 +261,13 @@ def snapshot_text(snapshot, symbol, timeframe):
     flow_sum = trade_flow_summary(flow) if flow else {}
 
     lines = [
-        f"📊 تحليل ROBI — {symbol.upper()} — {timeframe}",
+        f"📊 ROBI ANALYSIS — {symbol.upper()} — {timeframe}",
         "",
         f"💵 السعر: {money(price)}",
         f"📈 24h: {change:+.2f}%",
         f"📦 حجم 24h: ${volume_24:,.0f}",
-        f"🧭 الاتجاه: {ar_trend(snapshot.get('trend', 'unknown'))}",
-        f"🧠 الحالة: {ar_state(snapshot.get('state', 'WAIT'))}",
+        f"🧭 الاتجاه: {snapshot.get('trend', 'unknown')}",
+        f"🧠 الحالة: {snapshot.get('state', 'WAIT')}",
         "",
         "🕯️ الشموع:",
         ("• " + ", ".join(patterns)) if patterns else "• لا يوجد نمط مسجل على آخر شمعة",
@@ -407,13 +285,13 @@ def snapshot_text(snapshot, symbol, timeframe):
         f"• Stochastic14: {compact(indicators.get('stochastic14'))}",
         f"• MACD: {compact(indicators.get('macd'))}",
         "",
-        "🪟 النوافذ السعرية:",
+        "🪟 Windows:",
         "• " + (", ".join(str(w) for w in windows[:3]) if windows else "لا يوجد"),
         "",
-        "📊 الحجم:",
+        "📊 Volume:",
         f"• {json.dumps(volume, ensure_ascii=False)}",
         "",
-        "🔄 تدفق الصفقات:",
+        "🔄 Trade Flow:",
         (
             f"• BUY: ${safe_float(flow_sum.get('buy_notional')):,.2f}\n"
             f"• SELL: ${safe_float(flow_sum.get('sell_notional')):,.2f}\n"
@@ -421,14 +299,8 @@ def snapshot_text(snapshot, symbol, timeframe):
             f"• SELL share: {safe_float(flow_sum.get('sell_share')) * 100:.1f}%"
         ) if flow_sum else "• لا توجد بيانات تدفق",
         "",
-        "📰 ملخص الأخبار:",
-        f"• عدد الأخبار: {len(snapshot.get('news', []))}",
-        f"• 🟢 الإيجابي: {(snapshot.get('news_analysis') or {}).get('positive', 0)}",
-        f"• 🔴 السلبي: {(snapshot.get('news_analysis') or {}).get('negative', 0)}",
-        f"• ⚪ المحايد: {(snapshot.get('news_analysis') or {}).get('neutral', 0)}",
-        f"• 📊 درجة الثقة: {((snapshot.get('news_analysis') or {}).get('confidence', 0) * 100):.0f}%",
-        f"• 🧭 اتجاه الأخبار: {(snapshot.get('news_analysis') or {}).get('direction_ar', 'لا توجد أخبار')}",
-        f"• 🎯 الأثر المحتمل: {(snapshot.get('news_analysis') or {}).get('impact_ar', 'غير واضح')}",
+        "📰 الأخبار المرتبطة:",
+        f"• {len(snapshot.get('news', []))} خبر/أخبار مخزنة",
         "",
         "🧠 تفسير الحالة:",
     ]
@@ -448,9 +320,9 @@ def snapshot_text(snapshot, symbol, timeframe):
     confluence = snapshot.get("confluence") or {}
     lines.extend([
         "",
-        "🔗 توافق الأدلة:",
-        f"• الاتجاه: {ar_trend(confluence.get('trend', snapshot.get('trend', 'unknown')))}",
-        f"• الحالة: {ar_state(confluence.get('state', snapshot.get('state', 'WAIT')))}",
+        "🔗 Confluence — توافق الأدلة:",
+        f"• الاتجاه: {confluence.get('trend', snapshot.get('trend', 'unknown'))}",
+        f"• الحالة: {confluence.get('state', snapshot.get('state', 'WAIT'))}",
         f"• الأدلة الصاعدة: {confluence.get('bullish_count', 0)}",
         f"• الأدلة الهابطة: {confluence.get('bearish_count', 0)}",
         f"• المحايدة: {confluence.get('neutral_count', 0)}",
@@ -477,6 +349,14 @@ def snapshot_text(snapshot, symbol, timeframe):
 
     if confluence.get("agreement"):
         lines.extend(["", f"📌 حالة التوافق: {confluence['agreement']}"])
+
+    condition = snapshot.get("state_change_condition") or {}
+    if condition:
+        lines.extend(["", "🎯 شرط تغيّر الحالة:"])
+        lines.append(f"• {condition.get('primary', 'تأكيد إضافي من السوق')}")
+        for item in (condition.get("conditions") or [])[1:3]:
+            lines.append(f"• {item}")
+        lines.append(f"📌 {condition.get('note', '')}")
 
     lines.extend([
         "",
@@ -568,17 +448,14 @@ def symbol_assets(symbol: str):
 
 def news_for_symbol(symbol: str, limit=10):
     try:
-        rows = latest_news(limit=50)
+        if fresh_news is not None:
+            rows = fresh_news(latest_news(limit=50), max_age_hours=24, limit=50)
+        else:
+            rows = latest_news(limit=50, max_age_hours=24)
     except Exception:
         rows = []
 
     assets = symbol_assets(symbol)
-
-    if not rows:
-        try:
-            rows = fetch_news(limit=limit, query=symbol.upper(), symbol=symbol.upper())
-        except Exception:
-            rows = []
     out = []
 
     for item in rows:
@@ -602,41 +479,82 @@ def news_for_symbol(symbol: str, limit=10):
 def news_text(symbol=None, limit=10):
     if symbol:
         rows = news_for_symbol(symbol, limit)
-        title = f"📰 أخبار ROBI — {symbol.upper()}"
+        title = f"📰 ROBI NEWS — {symbol.upper()}"
     else:
-        rows = latest_news(limit)
-        title = "📰 أخبار ROBI — أخبار السوق"
+        rows = (fresh_news(latest_news(limit=limit), max_age_hours=24, limit=limit)
+                if fresh_news is not None
+                else latest_news(limit, max_age_hours=24))
+        title = "📰 ROBI NEWS — Global Market Feed"
 
     if not rows:
         return title + "\n\nلا توجد أخبار مخزنة حاليًا."
 
     lines = [title, ""]
     for i, item in enumerate(rows, 1):
-        sentiment = item.get("sentiment_ar") or item.get("sentiment") or "⚪ محايد"
-        confidence = item.get("confidence_ar") or "غير متوفرة"
-        reason = item.get("reason_ar") or "لم يتوفر سبب التصنيف."
-        source = item.get("source") or "غير معروف"
-        published = item.get("published") or item.get("pubDate") or "غير معروف"
-        url = item.get("url") or item.get("link") or ""
-
-        lines.extend([
-            f"{i}) {item.get('title', 'بدون عنوان')}",
-            f"📌 التصنيف: {sentiment}",
-            f"📊 درجة الثقة: {confidence}",
-            f"📝 سبب التصنيف: {reason}",
-            f"📰 المصدر: {source}",
-            f"🕒 الوقت: {published}",
-        ])
-        if url:
-            lines.append(f"🔗 {url}")
-        lines.append("")
-
-    return "\n".join(lines).rstrip()
+        lines.append(
+            f"{i}) {item.get('title', 'بدون عنوان')}\n"
+            f"المصدر: {item.get('source', '—')}\n"
+            f"الوقت: {item.get('published', '—')}\n"
+            f"{item.get('url', '')}"
+        )
+    return "\n\n".join(lines)
 
 
 # ------------------------------------------------------------
 # Analysis
 # ------------------------------------------------------------
+
+def state_change_condition(snapshot):
+    """Describe the concrete evidence ROBI is waiting for before a state change.
+    This is an explanatory condition, not a buy/sell signal.
+    """
+    ticker = snapshot.get("ticker") or {}
+    price = safe_float(ticker.get("lastPrice"))
+    indicators = snapshot.get("indicators") or {}
+    volume = snapshot.get("volume") or {}
+    support = [safe_float(x) for x in (snapshot.get("support") or []) if safe_float(x)]
+    resistance = [safe_float(x) for x in (snapshot.get("resistance") or []) if safe_float(x)]
+    trend = str(snapshot.get("trend", "")).lower()
+    state = str(snapshot.get("state", "WAIT")).upper()
+    rvol = safe_float(volume.get("relative"))
+
+    conditions = []
+    if trend == "up":
+        if resistance:
+            nearest_r = min(resistance, key=lambda x: abs(x - price))
+            if nearest_r > 0 and price < nearest_r:
+                conditions.append(f"اختراق المقاومة {money(nearest_r)} مع تأكيد الشمعة التالية")
+            else:
+                conditions.append("تأكيد استمرار الحركة فوق منطقة المقاومة")
+        if rvol < 1.0:
+            conditions.append("ارتفاع الحجم النسبي فوق متوسطه لدعم الحركة")
+        if safe_float(indicators.get("rsi14")) < 50:
+            conditions.append("عودة RSI فوق 50")
+        if not conditions:
+            conditions.append("تأكيد استمرار الاتجاه الصاعد بشمعة وحجم داعمين")
+    elif trend == "down":
+        if support:
+            nearest_s = min(support, key=lambda x: abs(x - price))
+            if nearest_s > 0 and price > nearest_s:
+                conditions.append(f"كسر الدعم {money(nearest_s)} مع تأكيد الشمعة التالية")
+            else:
+                conditions.append("تأكيد استمرار الحركة أسفل منطقة الدعم")
+        if rvol < 1.0:
+            conditions.append("ارتفاع الحجم النسبي لتأكيد الحركة")
+        if safe_float(indicators.get("rsi14")) > 50:
+            conditions.append("تراجع RSI أسفل 50")
+        if not conditions:
+            conditions.append("تأكيد استمرار الاتجاه الهابط بشمعة وحجم داعمين")
+    else:
+        conditions.append("ظهور اتجاه واضح مع تأكيد من السعر والحجم والمؤشرات")
+
+    return {
+        "state": state,
+        "conditions": conditions[:3],
+        "primary": conditions[0],
+        "note": "هذه شروط متابعة وتأكيد وليست إشارة شراء أو بيع.",
+    }
+
 
 def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
     if not ENGINE_READY:
@@ -645,14 +563,10 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
         )
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
-    try:
-        fetch_news(20, query=symbol.upper(), symbol=symbol.upper())
-    except Exception as exc:
-        print("News fetch warning:", exc)
     snapshot["news"] = news_for_symbol(symbol, 10)
-    snapshot["news_analysis"] = summarize_news_for_analysis(snapshot["news"])
     snapshot["explainability"] = build_explainability(snapshot)
     snapshot["confluence"] = build_confluence(snapshot)
+    snapshot["state_change_condition"] = state_change_condition(snapshot)
     ensure_db()
 
     try:
