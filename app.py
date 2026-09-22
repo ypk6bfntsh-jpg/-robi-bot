@@ -80,7 +80,7 @@ try:
     )
     from robi_engine.explainability import build_explainability
     from robi_engine.confluence import build_confluence
-    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news
+    from robi_engine.news_engine import fetch_news, latest_news, init_db, analyze_news, analyze_news
     try:
         from robi_engine.live_data import (
             get_klines,
@@ -265,6 +265,16 @@ def ar_news_direction(value):
         "mixed": "مختلط",
         "none": "لا توجد أخبار",
     }.get(str(value).lower(), str(value))
+def ar_confluence_state(value):
+    return {
+        "up": "صاعد",
+        "down": "هابط",
+        "WAIT": "انتظار",
+        "BUY": "شراء",
+        "SELL": "بيع",
+        "HOLD": "احتفاظ",
+    }.get(str(value), str(value))
+
 
 def snapshot_text(snapshot, symbol, timeframe):
     ticker = snapshot.get("ticker") or {}
@@ -309,7 +319,7 @@ def snapshot_text(snapshot, symbol, timeframe):
         "🪟 النوافذ السعرية:",
         "• " + (", ".join(str(w) for w in windows[:3]) if windows else "لا يوجد"),
         "",
-        "📊 Volume:",
+        "📊 الحجم:",
         f"• {json.dumps(volume, ensure_ascii=False)}",
         "",
         "🔄 تدفق الصفقات:",
@@ -343,8 +353,8 @@ def snapshot_text(snapshot, symbol, timeframe):
     lines.extend([
         "",
         "🔗 توافق الأدلة:",
-        f"• الاتجاه: {confluence.get('trend', snapshot.get('trend', 'unknown'))}",
-        f"• الحالة: {confluence.get('state', snapshot.get('state', 'WAIT'))}",
+        f"• الاتجاه: {ar_trend(confluence.get('trend', snapshot.get('trend', 'unknown')))}",
+        f"• الحالة: {ar_state(confluence.get('state', snapshot.get('state', 'WAIT')))}",
         f"• الأدلة الصاعدة: {confluence.get('bullish_count', 0)}",
         f"• الأدلة الهابطة: {confluence.get('bearish_count', 0)}",
         f"• المحايدة: {confluence.get('neutral_count', 0)}",
