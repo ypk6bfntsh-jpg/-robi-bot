@@ -196,10 +196,12 @@ def _save(rows):
     conn.close()
     return saved
 
-def fetch_news(limit=20, query="NVIDIA OR NVDA"):
+def fetch_news(limit=20, query="NVIDIA OR NVDA", symbol=None):
     """جلب أخبار حديثة من Google News RSS وتخزينها."""
     init_db()
     try:
+        if symbol:
+            query = symbol
         url = RSS_URL.format(query=quote_plus(query))
         response = requests.get(
             url,
@@ -231,6 +233,51 @@ def latest_news(limit=10, query=None):
         ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+def analyze_news(rows):
+    """تلخيص اتجاه مجموعة الأخبار ليستخدمه ROBI في التحليل والتوافق."""
+    rows = rows or []
+    if not rows:
+        return {
+            "direction": "none",
+            "direction_ar": "لا توجد أخبار",
+            "positive": 0,
+            "negative": 0,
+            "neutral": 0,
+            "confidence": 0.0,
+        }
+
+    positive = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "positive")
+    negative = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "negative")
+    neutral = sum(1 for r in rows if str(r.get("sentiment", "")).lower() == "neutral")
+
+    total = positive + negative + neutral
+    if positive > negative:
+        direction = "positive"
+        direction_ar = "إيجابي"
+    elif negative > positive:
+        direction = "negative"
+        direction_ar = "سلبي"
+    elif positive == negative and positive > 0:
+        direction = "mixed"
+        direction_ar = "مختلط"
+    else:
+        direction = "none"
+        direction_ar = "محايد"
+
+    confidence = 0.0
+    if total:
+        confidence = round(max(positive, negative) / total, 2)
+
+    return {
+        "direction": direction,
+        "direction_ar": direction_ar,
+        "positive": positive,
+        "negative": negative,
+        "neutral": neutral,
+        "confidence": confidence,
+    }
+
 
 def search_news(query, limit=10):
     """جلب أخبار تخص أصلًا محددًا، ثم إرجاع المخزن منها."""
