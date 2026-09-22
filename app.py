@@ -79,6 +79,7 @@ try:
         trade_flow_summary,
     )
     from robi_engine.explainability import build_explainability
+    from robi_engine.confluence import build_confluence
     from robi_engine.news_engine import fetch_news, latest_news, init_db
     try:
         from robi_engine.live_data import (
@@ -312,6 +313,39 @@ def snapshot_text(snapshot, symbol, timeframe):
     if explanation.get("summary"):
         lines.extend(["", f"📌 {explanation['summary']}"])
 
+    confluence = snapshot.get("confluence") or {}
+    lines.extend([
+        "",
+        "🔗 Confluence — توافق الأدلة:",
+        f"• الاتجاه: {confluence.get('trend', snapshot.get('trend', 'unknown'))}",
+        f"• الحالة: {confluence.get('state', snapshot.get('state', 'WAIT'))}",
+        f"• الأدلة الصاعدة: {confluence.get('bullish_count', 0)}",
+        f"• الأدلة الهابطة: {confluence.get('bearish_count', 0)}",
+        f"• المحايدة: {confluence.get('neutral_count', 0)}",
+        f"• التحذيرات: {confluence.get('warning_count', 0)}",
+    ])
+
+    supporting = confluence.get("supporting") or []
+    if supporting:
+        lines.append("🟢 الأدلة المتوافقة:")
+        for item in supporting[:6]:
+            lines.append(f"• {item}")
+
+    conflicts = confluence.get("conflicts") or []
+    if conflicts:
+        lines.append("🔀 التعارضات:")
+        for item in conflicts[:6]:
+            lines.append(f"• {item}")
+
+    confluence_warnings = confluence.get("warnings") or []
+    if confluence_warnings:
+        lines.append("⚠️ تحذيرات التوافق:")
+        for item in confluence_warnings[:6]:
+            lines.append(f"• {item}")
+
+    if confluence.get("agreement"):
+        lines.extend(["", f"📌 حالة التوافق: {confluence['agreement']}"])
+
     lines.extend([
         "",
         "🔐 الوضع: قراءة وتحليل + Paper Trading فقط",
@@ -462,6 +496,7 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
     snapshot["news"] = news_for_symbol(symbol, 10)
     snapshot["explainability"] = build_explainability(snapshot)
+    snapshot["confluence"] = build_confluence(snapshot)
     ensure_db()
 
     try:
