@@ -78,6 +78,7 @@ try:
         save_analysis,
         trade_flow_summary,
     )
+    from robi_engine.explainability import build_explainability
     from robi_engine.news_engine import fetch_news, latest_news, init_db
     try:
         from robi_engine.live_data import (
@@ -296,9 +297,26 @@ def snapshot_text(snapshot, symbol, timeframe):
         "📰 الأخبار المرتبطة:",
         f"• {len(snapshot.get('news', []))} خبر/أخبار مخزنة",
         "",
+        "🧠 تفسير الحالة:",
+    ]
+
+    explanation = snapshot.get("explainability") or {}
+    for item in (explanation.get("bullish") or [])[:6]:
+        lines.append(f"🟢 {item}")
+    for item in (explanation.get("bearish") or [])[:6]:
+        lines.append(f"🔴 {item}")
+    for item in (explanation.get("warnings") or [])[:5]:
+        lines.append(f"⚠️ {item}")
+    for item in (explanation.get("neutral") or [])[:3]:
+        lines.append(f"⚪ {item}")
+    if explanation.get("summary"):
+        lines.extend(["", f"📌 {explanation['summary']}"])
+
+    lines.extend([
+        "",
         "🔐 الوضع: قراءة وتحليل + Paper Trading فقط",
         "🚫 التداول الحقيقي: معطّل",
-    ]
+    ])
 
     return "\n".join(lines)
 
@@ -443,6 +461,7 @@ def run_analysis(symbol: str, timeframe: str = "15m", limit: int = 200):
 
     snapshot = analyze_live(symbol.upper(), timeframe, limit)
     snapshot["news"] = news_for_symbol(symbol, 10)
+    snapshot["explainability"] = build_explainability(snapshot)
     ensure_db()
 
     try:
