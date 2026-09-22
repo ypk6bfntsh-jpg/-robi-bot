@@ -241,6 +241,31 @@ def latest_candle(snapshot):
     return candles[-1] if candles else {}
 
 
+
+def ar_trend(value):
+    return {
+        "up": "صاعد",
+        "down": "هابط",
+        "sideways": "جانبي",
+        "unknown": "غير معروف",
+    }.get(str(value).lower(), str(value))
+
+def ar_state(value):
+    return {
+        "WAIT": "انتظار",
+        "BUY": "شراء",
+        "SELL": "بيع",
+        "HOLD": "احتفاظ",
+    }.get(str(value).upper(), str(value))
+
+def ar_news_direction(value):
+    return {
+        "positive": "إيجابي",
+        "negative": "سلبي",
+        "mixed": "مختلط",
+        "none": "لا توجد أخبار",
+    }.get(str(value).lower(), str(value))
+
 def snapshot_text(snapshot, symbol, timeframe):
     ticker = snapshot.get("ticker") or {}
     price = safe_float(ticker.get("lastPrice"))
@@ -257,13 +282,13 @@ def snapshot_text(snapshot, symbol, timeframe):
     flow_sum = trade_flow_summary(flow) if flow else {}
 
     lines = [
-        f"📊 ROBI ANALYSIS — {symbol.upper()} — {timeframe}",
+        f"📊 تحليل ROBI — {symbol.upper()} — {timeframe}",
         "",
         f"💵 السعر: {money(price)}",
         f"📈 24h: {change:+.2f}%",
         f"📦 حجم 24h: ${volume_24:,.0f}",
-        f"🧭 الاتجاه: {snapshot.get('trend', 'unknown')}",
-        f"🧠 الحالة: {snapshot.get('state', 'WAIT')}",
+        f"🧭 الاتجاه: {ar_trend(snapshot.get('trend', 'unknown'))}",
+        f"🧠 الحالة: {ar_state(snapshot.get('state', 'WAIT'))}",
         "",
         "🕯️ الشموع:",
         ("• " + ", ".join(patterns)) if patterns else "• لا يوجد نمط مسجل على آخر شمعة",
@@ -281,13 +306,13 @@ def snapshot_text(snapshot, symbol, timeframe):
         f"• Stochastic14: {compact(indicators.get('stochastic14'))}",
         f"• MACD: {compact(indicators.get('macd'))}",
         "",
-        "🪟 Windows:",
+        "🪟 النوافذ السعرية:",
         "• " + (", ".join(str(w) for w in windows[:3]) if windows else "لا يوجد"),
         "",
         "📊 Volume:",
         f"• {json.dumps(volume, ensure_ascii=False)}",
         "",
-        "🔄 Trade Flow:",
+        "🔄 تدفق الصفقات:",
         (
             f"• BUY: ${safe_float(flow_sum.get('buy_notional')):,.2f}\n"
             f"• SELL: ${safe_float(flow_sum.get('sell_notional')):,.2f}\n"
@@ -317,7 +342,7 @@ def snapshot_text(snapshot, symbol, timeframe):
     confluence = snapshot.get("confluence") or {}
     lines.extend([
         "",
-        "🔗 Confluence — توافق الأدلة:",
+        "🔗 توافق الأدلة:",
         f"• الاتجاه: {confluence.get('trend', snapshot.get('trend', 'unknown'))}",
         f"• الحالة: {confluence.get('state', snapshot.get('state', 'WAIT'))}",
         f"• الأدلة الصاعدة: {confluence.get('bullish_count', 0)}",
@@ -465,23 +490,36 @@ def news_for_symbol(symbol: str, limit=10):
 def news_text(symbol=None, limit=10):
     if symbol:
         rows = news_for_symbol(symbol, limit)
-        title = f"📰 ROBI NEWS — {symbol.upper()}"
+        title = f"📰 أخبار ROBI — {symbol.upper()}"
     else:
         rows = latest_news(limit)
-        title = "📰 ROBI NEWS — Global Market Feed"
+        title = "📰 أخبار ROBI — أخبار السوق"
 
     if not rows:
         return title + "\n\nلا توجد أخبار مخزنة حاليًا."
 
     lines = [title, ""]
     for i, item in enumerate(rows, 1):
-        lines.append(
-            f"{i}) {item.get('title', 'بدون عنوان')}\n"
-            f"المصدر: {item.get('source', '—')}\n"
-            f"الوقت: {item.get('published', '—')}\n"
-            f"{item.get('url', '')}"
-        )
-    return "\n\n".join(lines)
+        sentiment = item.get("sentiment_ar") or item.get("sentiment") or "⚪ محايد"
+        confidence = item.get("confidence_ar") or "غير متوفرة"
+        reason = item.get("reason_ar") or "لم يتوفر سبب التصنيف."
+        source = item.get("source") or "غير معروف"
+        published = item.get("published") or item.get("pubDate") or "غير معروف"
+        url = item.get("url") or item.get("link") or ""
+
+        lines.extend([
+            f"{i}) {item.get('title', 'بدون عنوان')}",
+            f"📌 التصنيف: {sentiment}",
+            f"📊 درجة الثقة: {confidence}",
+            f"📝 سبب التصنيف: {reason}",
+            f"📰 المصدر: {source}",
+            f"🕒 الوقت: {published}",
+        ])
+        if url:
+            lines.append(f"🔗 {url}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 # ------------------------------------------------------------
